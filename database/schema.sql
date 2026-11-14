@@ -1,0 +1,1306 @@
+/* =====================================================================
+   SmartClinic (Ayush Pro) – Multi-branch database schema
+   Microsoft SQL Server 2016+  (database: T_multi_branch)
+
+   Run with:  node backend/scripts/init-db.js   (or paste into SSMS)
+   Safe to run again: every table / index is created only if missing.
+
+   Rules of the schema
+   - Every operational record carries clinic_id. Branch users are always
+     filtered to their own clinic_id by the API. Super Admin / Admin have
+     clinic_id = NULL on their employee row and may open any clinic.
+   - Text columns are NVARCHAR so Tamil is stored correctly.
+   - Timestamps default to India time (UTC + 5:30), independent of the
+     server's own time zone.
+   ===================================================================== */
+
+/* ---------- 1. MAIN CLINIC LEVEL: branches, pharmacies, labs ---------- */
+IF OBJECT_ID(N'dbo.clinics', N'U') IS NULL
+CREATE TABLE dbo.clinics (
+  id               INT IDENTITY(1,1) PRIMARY KEY,
+  name             NVARCHAR(150) NOT NULL,
+  code             NVARCHAR(10)  NOT NULL CONSTRAINT uq_clinics_code UNIQUE,   -- CLA → patient IDs CLA-0001
+  address          NVARCHAR(500) NULL,
+  city             NVARCHAR(100) NULL,
+  phone            NVARCHAR(20)  NULL,
+  email            NVARCHAR(150) NULL,
+  consultation_fee DECIMAL(10,2) NOT NULL DEFAULT 0,                           -- pre-filled in Examine
+  status           NVARCHAR(10)  NOT NULL DEFAULT N'active' CONSTRAINT chk_clinics_status CHECK (status IN (N'active', N'inactive')),
+  created_by       INT NULL,
+  created_at       DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at       DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+
+IF OBJECT_ID(N'dbo.pharmacies', N'U') IS NULL
+CREATE TABLE dbo.pharmacies (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_pharmacies_clinic REFERENCES dbo.clinics(id),
+  name        NVARCHAR(150) NOT NULL,
+  code        NVARCHAR(10)  NOT NULL CONSTRAINT uq_pharmacies_code UNIQUE,
+  address     NVARCHAR(500) NULL,
+  phone       NVARCHAR(20)  NULL,
+  license_no  NVARCHAR(60)  NULL,
+  status      NVARCHAR(10)  NOT NULL DEFAULT N'active' CONSTRAINT chk_pharmacies_status CHECK (status IN (N'active', N'inactive')),
+  created_by  INT NULL,
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+
+IF OBJECT_ID(N'dbo.labs', N'U') IS NULL
+CREATE TABLE dbo.labs (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_labs_clinic REFERENCES dbo.clinics(id),
+  name        NVARCHAR(150) NOT NULL,
+  code        NVARCHAR(10)  NOT NULL CONSTRAINT uq_labs_code UNIQUE,
+  address     NVARCHAR(500) NULL,
+  phone       NVARCHAR(20)  NULL,
+  status      NVARCHAR(10)  NOT NULL DEFAULT N'active' CONSTRAINT chk_labs_status CHECK (status IN (N'active', N'inactive')),
+  created_by  INT NULL,
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+
+/* ---------- 2. EMPLOYEES (also the login table) ----------
+   super_admin / admin → clinic_id NULL, unit_type 'main'
+   everyone else       → clinic_id required; unit = clinic / pharmacy / lab */
+IF OBJECT_ID(N'dbo.employees', N'U') IS NULL
+CREATE TABLE dbo.employees (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NULL CONSTRAINT fk_employees_clinic REFERENCES dbo.clinics(id),
+  unit_type      NVARCHAR(10) NOT NULL DEFAULT N'clinic' CONSTRAINT chk_employees_unit_type CHECK (unit_type IN (N'main', N'clinic', N'pharmacy', N'lab')),
+  pharmacy_id    INT NULL CONSTRAINT fk_employees_pharmacy REFERENCES dbo.pharmacies(id),
+  lab_id         INT NULL CONSTRAINT fk_employees_lab REFERENCES dbo.labs(id),
+  emp_code       NVARCHAR(20)  NOT NULL CONSTRAINT uq_employees_code UNIQUE,   -- ADM-001 / CLA-E001
+  name           NVARCHAR(150) NOT NULL,
+  gender         NCHAR(1)      NULL CONSTRAINT chk_employees_gender CHECK (gender IN (N'M', N'F', N'O')),
+  dob            DATE NULL,
+  mobile         NVARCHAR(20)  NULL,
+  email          NVARCHAR(150) NULL,
+  designation    NVARCHAR(100) NULL,
+  qualification  NVARCHAR(150) NULL,
+  address        NVARCHAR(500) NULL,
+  join_date      DATE NULL,
+  role           NVARCHAR(20) NOT NULL CONSTRAINT chk_employees_role CHECK (role IN (N'super_admin', N'admin', N'receptionist', N'doctor', N'pharmacist', N'billing')),
+  username       NVARCHAR(60)  NULL,                                          -- unique when set (index below)
+  password_hash  NVARCHAR(100) NULL,
+  can_login      BIT NOT NULL DEFAULT 1,
+  status         NVARCHAR(10)  NOT NULL DEFAULT N'active' CONSTRAINT chk_employees_status CHECK (status IN (N'active', N'inactive')),
+  last_login_at  DATETIME2(0) NULL,
+  created_by     INT NULL,
+  created_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT chk_employees_scope CHECK (
+    (role IN (N'super_admin', N'admin') AND clinic_id IS NULL AND unit_type = N'main')
+    OR (role NOT IN (N'super_admin', N'admin') AND clinic_id IS NOT NULL AND unit_type <> N'main')
+  ),
+  CONSTRAINT chk_employees_unit CHECK (
+    (unit_type = N'pharmacy' AND pharmacy_id IS NOT NULL) OR
+    (unit_type = N'lab' AND lab_id IS NOT NULL) OR
+    (unit_type IN (N'main', N'clinic'))
+  )
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uq_employees_username' AND object_id = OBJECT_ID(N'dbo.employees'))
+  CREATE UNIQUE INDEX uq_employees_username ON dbo.employees(username) WHERE username IS NOT NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_employees_clinic_role' AND object_id = OBJECT_ID(N'dbo.employees'))
+  CREATE INDEX ix_employees_clinic_role ON dbo.employees(clinic_id, role);
+GO
+
+/* User-wise access (Main Clinic → Menu Permission): only the differences from the
+   employee's role defaults are stored. granted = 1 adds a permission, 0 removes it. */
+IF OBJECT_ID(N'dbo.employee_permissions', N'U') IS NULL
+CREATE TABLE dbo.employee_permissions (
+  employee_id  INT NOT NULL CONSTRAINT fk_emp_perm_employee REFERENCES dbo.employees(id),
+  permission   NVARCHAR(40) NOT NULL,
+  granted      BIT NOT NULL,
+  updated_by   INT NULL CONSTRAINT fk_emp_perm_by REFERENCES dbo.employees(id),
+  updated_at   DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT pk_employee_permissions PRIMARY KEY (employee_id, permission)
+);
+GO
+
+/* Doctor time slots: several rows per doctor, each with an optional break inside start–end.
+   Saved together with the employee (the whole list is replaced on every save). */
+IF OBJECT_ID(N'dbo.doctor_time_slots', N'U') IS NULL
+CREATE TABLE dbo.doctor_time_slots (
+  id            INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id     INT NOT NULL CONSTRAINT fk_slots_clinic REFERENCES dbo.clinics(id),
+  employee_id   INT NOT NULL CONSTRAINT fk_slots_employee REFERENCES dbo.employees(id),
+  start_time    TIME(0) NOT NULL,
+  end_time      TIME(0) NOT NULL,
+  slot_minutes  SMALLINT NOT NULL CONSTRAINT chk_slots_minutes CHECK (slot_minutes BETWEEN 5 AND 480),   -- one appointment
+  break_start   TIME(0) NULL,
+  break_end     TIME(0) NULL,
+  created_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT chk_slots_order CHECK (end_time > start_time),
+  CONSTRAINT chk_slots_break CHECK (
+    (break_start IS NULL AND break_end IS NULL)
+    OR (break_start >= start_time AND break_end > break_start AND break_end <= end_time)
+  )
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_slots_employee' AND object_id = OBJECT_ID(N'dbo.doctor_time_slots'))
+  CREATE INDEX ix_slots_employee ON dbo.doctor_time_slots(employee_id, start_time);
+GO
+
+/* ---------- 3. PER-CLINIC NUMBER SEQUENCES ----------
+   seq_key: 'patient', 'bill', 'employee', 'token:2026-10-16'; clinic_id 0 = global */
+IF OBJECT_ID(N'dbo.code_sequences', N'U') IS NULL
+CREATE TABLE dbo.code_sequences (
+  clinic_id   INT NOT NULL,
+  seq_key     NVARCHAR(30) NOT NULL,
+  last_value  INT NOT NULL DEFAULT 0,
+  updated_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT pk_code_sequences PRIMARY KEY (clinic_id, seq_key)
+);
+GO
+
+/* ---------- 4. PATIENTS ---------- */
+IF OBJECT_ID(N'dbo.patients', N'U') IS NULL
+CREATE TABLE dbo.patients (
+  id            INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id     INT NOT NULL CONSTRAINT fk_patients_clinic REFERENCES dbo.clinics(id),
+  patient_code  NVARCHAR(20)  NOT NULL,                                       -- CLA-0001 (unique per clinic)
+  name          NVARCHAR(150) NOT NULL,
+  gender        NCHAR(1)      NULL CONSTRAINT chk_patients_gender CHECK (gender IN (N'M', N'F', N'O')),
+  dob           DATE NULL,
+  age_years     TINYINT NULL,
+  mobile        NVARCHAR(20)  NOT NULL,
+  alt_mobile    NVARCHAR(20)  NULL,
+  email         NVARCHAR(150) NULL,
+  address       NVARCHAR(500) NULL,
+  city          NVARCHAR(100) NULL,
+  blood_group   NVARCHAR(5)   NULL,
+  occupation    NVARCHAR(100) NULL,
+  notes         NVARCHAR(MAX) NULL,
+  status        NVARCHAR(10)  NOT NULL DEFAULT N'active' CONSTRAINT chk_patients_status CHECK (status IN (N'active', N'inactive')),
+  created_by    INT NULL CONSTRAINT fk_patients_creator REFERENCES dbo.employees(id),
+  created_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_patients_clinic_code UNIQUE (clinic_id, patient_code)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_patients_clinic_mobile' AND object_id = OBJECT_ID(N'dbo.patients'))
+  CREATE INDEX ix_patients_clinic_mobile ON dbo.patients(clinic_id, mobile);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_patients_clinic_name' AND object_id = OBJECT_ID(N'dbo.patients'))
+  CREATE INDEX ix_patients_clinic_name ON dbo.patients(clinic_id, name);
+GO
+
+/* ---------- 5. DAILY QUEUE (Confirm & Search → Confirm List) ---------- */
+IF OBJECT_ID(N'dbo.queue_entries', N'U') IS NULL
+CREATE TABLE dbo.queue_entries (
+  id            INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id     INT NOT NULL CONSTRAINT fk_queue_clinic REFERENCES dbo.clinics(id),
+  patient_id    INT NOT NULL CONSTRAINT fk_queue_patient REFERENCES dbo.patients(id),
+  queue_date    DATE NOT NULL,
+  token_no      SMALLINT NOT NULL,
+  visit_type    NVARCHAR(10) NOT NULL DEFAULT N'new' CONSTRAINT chk_queue_visit_type CHECK (visit_type IN (N'new', N'follow_up')),
+  status        NVARCHAR(12) NOT NULL DEFAULT N'waiting' CONSTRAINT chk_queue_status CHECK (status IN (N'waiting', N'with_doctor', N'done', N'cancelled')),
+  doctor_id     INT NULL CONSTRAINT fk_queue_doctor REFERENCES dbo.employees(id),
+  confirmed_by  INT NULL CONSTRAINT fk_queue_by REFERENCES dbo.employees(id),
+  confirmed_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  called_at     DATETIME2(0) NULL,
+  completed_at  DATETIME2(0) NULL,
+  CONSTRAINT uq_queue_token UNIQUE (clinic_id, queue_date, token_no)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_queue_patient' AND object_id = OBJECT_ID(N'dbo.queue_entries'))
+  CREATE INDEX ix_queue_patient ON dbo.queue_entries(clinic_id, patient_id, queue_date);
+GO
+/* Tokens: a queue entry booked into one of the doctor's time slots (start time of the slot). */
+IF COL_LENGTH(N'dbo.queue_entries', N'slot_time') IS NULL
+  ALTER TABLE dbo.queue_entries ADD slot_time TIME(0) NULL;
+GO
+-- one patient per doctor per slot per day (a cancelled entry frees its slot)
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uq_queue_doctor_slot' AND object_id = OBJECT_ID(N'dbo.queue_entries'))
+  CREATE UNIQUE INDEX uq_queue_doctor_slot ON dbo.queue_entries(clinic_id, queue_date, doctor_id, slot_time)
+    WHERE slot_time IS NOT NULL AND status <> N'cancelled';
+GO
+/* Token confirm: a patient booked from Tokens is confirmed at reception when they arrive (arrived_at);
+   only then can vital signs be recorded. Walk-ins from Confirm & Search are present already, so they
+   arrive when confirmed (existing walk-in rows are filled in once, when the column is added). */
+IF COL_LENGTH(N'dbo.queue_entries', N'arrived_at') IS NULL
+BEGIN
+  ALTER TABLE dbo.queue_entries ADD
+    arrived_at DATETIME2(0) NULL,
+    arrived_by INT NULL CONSTRAINT fk_queue_arrived_by REFERENCES dbo.employees(id);
+  EXEC(N'UPDATE dbo.queue_entries SET arrived_at = confirmed_at, arrived_by = confirmed_by WHERE slot_time IS NULL');
+END
+GO
+
+/* Vital signs: the next step after a patient is confirmed into the queue (one record per queue entry).
+   Recorded at reception, can be edited later (also by the doctor in Examine). */
+IF OBJECT_ID(N'dbo.patient_vitals', N'U') IS NULL
+CREATE TABLE dbo.patient_vitals (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_vitals_clinic REFERENCES dbo.clinics(id),
+  queue_id       INT NOT NULL CONSTRAINT fk_vitals_queue REFERENCES dbo.queue_entries(id)
+                     CONSTRAINT uq_vitals_queue UNIQUE,
+  patient_id     INT NOT NULL CONSTRAINT fk_vitals_patient REFERENCES dbo.patients(id),
+  height_cm      DECIMAL(4,1) NULL CONSTRAINT chk_vitals_height CHECK (height_cm BETWEEN 30 AND 250),
+  weight_kg      DECIMAL(4,1) NULL CONSTRAINT chk_vitals_weight CHECK (weight_kg BETWEEN 0.5 AND 300),
+  bp_systolic    SMALLINT NULL CONSTRAINT chk_vitals_sys CHECK (bp_systolic BETWEEN 50 AND 260),
+  bp_diastolic   SMALLINT NULL CONSTRAINT chk_vitals_dia CHECK (bp_diastolic BETWEEN 30 AND 160),
+  pulse_bpm      SMALLINT NULL CONSTRAINT chk_vitals_pulse CHECK (pulse_bpm BETWEEN 30 AND 220),
+  temperature_f  DECIMAL(4,1) NULL CONSTRAINT chk_vitals_temp_f CHECK (temperature_f BETWEEN 86 AND 113),
+  comments       NVARCHAR(500) NULL,
+  recorded_by    INT NULL CONSTRAINT fk_vitals_by REFERENCES dbo.employees(id),
+  recorded_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_by     INT NULL CONSTRAINT fk_vitals_updated_by REFERENCES dbo.employees(id),
+  updated_at     DATETIME2(0) NULL,
+  CONSTRAINT chk_vitals_bp CHECK ((bp_systolic IS NULL AND bp_diastolic IS NULL) OR (bp_diastolic < bp_systolic))
+);
+GO
+/* Temperature is recorded in °F: an older table with temperature_c is converted once
+   (°C × 9/5 + 32, one decimal) and the °C column is removed. */
+IF COL_LENGTH(N'dbo.patient_vitals', N'temperature_f') IS NULL
+BEGIN
+  ALTER TABLE dbo.patient_vitals ADD
+    temperature_f DECIMAL(4,1) NULL CONSTRAINT chk_vitals_temp_f CHECK (temperature_f BETWEEN 86 AND 113);
+  IF COL_LENGTH(N'dbo.patient_vitals', N'temperature_c') IS NOT NULL
+  BEGIN
+    EXEC(N'UPDATE dbo.patient_vitals SET temperature_f = ROUND(temperature_c * 9.0 / 5 + 32, 1) WHERE temperature_c IS NOT NULL');
+    IF OBJECT_ID(N'dbo.chk_vitals_temp', N'C') IS NOT NULL ALTER TABLE dbo.patient_vitals DROP CONSTRAINT chk_vitals_temp;
+    ALTER TABLE dbo.patient_vitals DROP COLUMN temperature_c;
+  END
+END
+GO
+/* Blood pressure of the right arm (Vital Signs → R – Blood pressure); bp_systolic / bp_diastolic are the left arm */
+IF COL_LENGTH(N'dbo.patient_vitals', N'bp_r_systolic') IS NULL
+  ALTER TABLE dbo.patient_vitals ADD
+    bp_r_systolic  SMALLINT NULL CONSTRAINT chk_vitals_r_sys CHECK (bp_r_systolic BETWEEN 50 AND 260),
+    bp_r_diastolic SMALLINT NULL CONSTRAINT chk_vitals_r_dia CHECK (bp_r_diastolic BETWEEN 30 AND 160),
+    CONSTRAINT chk_vitals_r_bp CHECK ((bp_r_systolic IS NULL AND bp_r_diastolic IS NULL) OR (bp_r_diastolic < bp_r_systolic));
+GO
+/* Blood sugar (Vital Signs → Blood sugar): the test picked from the drop-down and its result –
+   FBS / PPBS / RBS in mg/dL, HbA1c in %; both NULL = not checked */
+IF COL_LENGTH(N'dbo.patient_vitals', N'sugar_type') IS NULL
+  ALTER TABLE dbo.patient_vitals ADD
+    sugar_type  NVARCHAR(10) NULL CONSTRAINT chk_vitals_sugar_type CHECK (sugar_type IN (N'FBS', N'PPBS', N'RBS', N'HbA1c')),
+    sugar_value DECIMAL(4,1) NULL CONSTRAINT chk_vitals_sugar_value CHECK (sugar_value BETWEEN 3 AND 600),
+    CONSTRAINT chk_vitals_sugar CHECK ((sugar_type IS NULL AND sugar_value IS NULL) OR (sugar_type IS NOT NULL AND sugar_value IS NOT NULL));
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_vitals_patient' AND object_id = OBJECT_ID(N'dbo.patient_vitals'))
+  CREATE INDEX ix_vitals_patient ON dbo.patient_vitals(clinic_id, patient_id);
+GO
+/* Lab reports & scans uploaded with the vital signs (Photo or PDF, max 5 MB – rules in shared/attachments.js).
+   Kept per patient and queue entry (that day's visit); the file itself is stored in `data`. */
+IF OBJECT_ID(N'dbo.patient_attachments', N'U') IS NULL
+CREATE TABLE dbo.patient_attachments (
+  id           INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id    INT NOT NULL CONSTRAINT fk_attach_clinic REFERENCES dbo.clinics(id),
+  patient_id   INT NOT NULL CONSTRAINT fk_attach_patient REFERENCES dbo.patients(id),
+  queue_id     INT NULL CONSTRAINT fk_attach_queue REFERENCES dbo.queue_entries(id),
+  file_type    NVARCHAR(10) NOT NULL CONSTRAINT chk_attach_type CHECK (file_type IN (N'photo', N'pdf')),
+  category     NVARCHAR(60) NULL,
+  file_name    NVARCHAR(200) NOT NULL,
+  mime_type    NVARCHAR(100) NOT NULL,
+  size_bytes   INT NOT NULL CONSTRAINT chk_attach_size CHECK (size_bytes BETWEEN 1 AND 5242880),
+  data         VARBINARY(MAX) NOT NULL,
+  uploaded_by  INT NULL CONSTRAINT fk_attach_by REFERENCES dbo.employees(id),
+  uploaded_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_attach_patient' AND object_id = OBJECT_ID(N'dbo.patient_attachments'))
+  CREATE INDEX ix_attach_patient ON dbo.patient_attachments(clinic_id, patient_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_attach_queue' AND object_id = OBJECT_ID(N'dbo.patient_attachments'))
+  CREATE INDEX ix_attach_queue ON dbo.patient_attachments(queue_id);
+GO
+
+/* ---------- 6. DOCTOR: visits ---------- */
+IF OBJECT_ID(N'dbo.visits', N'U') IS NULL
+CREATE TABLE dbo.visits (
+  id                INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id         INT NOT NULL CONSTRAINT fk_visits_clinic REFERENCES dbo.clinics(id),
+  patient_id        INT NOT NULL CONSTRAINT fk_visits_patient REFERENCES dbo.patients(id),
+  queue_id          INT NULL CONSTRAINT fk_visits_queue REFERENCES dbo.queue_entries(id),   -- unique when set (index below)
+  doctor_id         INT NULL CONSTRAINT fk_visits_doctor REFERENCES dbo.employees(id),
+  visit_date        DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  complaints        NVARCHAR(MAX) NULL,
+  examination_notes NVARCHAR(MAX) NULL,
+  diagnosis         NVARCHAR(MAX) NULL,
+  vitals            NVARCHAR(MAX) NULL,                                       -- JSON: {"bp":"120/80","pulse":72,...}
+  advice            NVARCHAR(MAX) NULL,
+  follow_up_date    DATE NULL,
+  consultation_fee  DECIMAL(10,2) NOT NULL DEFAULT 0,
+  status            NVARCHAR(10) NOT NULL DEFAULT N'open' CONSTRAINT chk_visits_status CHECK (status IN (N'open', N'completed')),
+  created_at        DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at        DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uq_visits_queue' AND object_id = OBJECT_ID(N'dbo.visits'))
+  CREATE UNIQUE INDEX uq_visits_queue ON dbo.visits(queue_id) WHERE queue_id IS NOT NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_visits_patient' AND object_id = OBJECT_ID(N'dbo.visits'))
+  CREATE INDEX ix_visits_patient ON dbo.visits(clinic_id, patient_id, visit_date);
+GO
+
+/* ---------- 7. PHARMACY: items ---------- */
+IF OBJECT_ID(N'dbo.items', N'U') IS NULL
+CREATE TABLE dbo.items (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_items_clinic REFERENCES dbo.clinics(id),
+  pharmacy_id    INT NULL CONSTRAINT fk_items_pharmacy REFERENCES dbo.pharmacies(id),
+  name           NVARCHAR(200) NOT NULL,
+  category       NVARCHAR(100) NULL,                                          -- Dilution / Mother tincture / Tablet ...
+  unit           NVARCHAR(30)  NOT NULL DEFAULT N'nos',
+  price          DECIMAL(10,2) NOT NULL DEFAULT 0,
+  gst_percent    DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  stock_qty      DECIMAL(12,2) NOT NULL DEFAULT 0 CONSTRAINT chk_items_stock CHECK (stock_qty >= 0),
+  reorder_level  DECIMAL(12,2) NOT NULL DEFAULT 0,
+  status         NVARCHAR(10)  NOT NULL DEFAULT N'active' CONSTRAINT chk_items_status CHECK (status IN (N'active', N'inactive')),
+  created_by     INT NULL,
+  created_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_items_clinic_name_unit UNIQUE (clinic_id, name, unit)
+);
+GO
+/* Item details (Pharmacy → Item): type, HSN, manufacturer, supplier, generic / brand name,
+   purchase rate, MRP, discount, Schedule H / H1. Price = sell price. */
+IF COL_LENGTH(N'dbo.items', N'item_type') IS NULL
+  ALTER TABLE dbo.items ADD item_type NVARCHAR(50) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'hsn_code') IS NULL
+  ALTER TABLE dbo.items ADD hsn_code NVARCHAR(20) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'manufacturer') IS NULL
+  ALTER TABLE dbo.items ADD manufacturer NVARCHAR(150) NULL;
+GO
+-- items.supplier_id is added after dbo.suppliers is created (section 7b), so a new database installs cleanly
+IF COL_LENGTH(N'dbo.items', N'generic_name') IS NULL
+  ALTER TABLE dbo.items ADD generic_name NVARCHAR(150) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'brand_name') IS NULL
+  ALTER TABLE dbo.items ADD brand_name NVARCHAR(150) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'purchase_rate') IS NULL
+  ALTER TABLE dbo.items ADD purchase_rate DECIMAL(10,2) NOT NULL CONSTRAINT df_items_purchase_rate DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.items', N'mrp') IS NULL
+  ALTER TABLE dbo.items ADD mrp DECIMAL(10,2) NOT NULL CONSTRAINT df_items_mrp DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.items', N'discount_percent') IS NULL
+  ALTER TABLE dbo.items ADD discount_percent DECIMAL(5,2) NOT NULL CONSTRAINT df_items_discount DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.items', N'schedule_h') IS NULL
+  ALTER TABLE dbo.items ADD schedule_h BIT NOT NULL CONSTRAINT df_items_schedule_h DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.items', N'schedule_h1') IS NULL
+  ALTER TABLE dbo.items ADD schedule_h1 BIT NOT NULL CONSTRAINT df_items_schedule_h1 DEFAULT 0;
+GO
+
+/* Item Code (CLA-I0001, same per-clinic sequence as patients/bills), storage location
+   (Rack / Box), Pack description, and GST split into CGST / SGST (gst_percent stays the
+   sum of the two, so billing / dispense keep reading one number as before). */
+IF COL_LENGTH(N'dbo.items', N'item_code') IS NULL
+  ALTER TABLE dbo.items ADD item_code NVARCHAR(20) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'pack') IS NULL
+  ALTER TABLE dbo.items ADD pack NVARCHAR(50) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'rack') IS NULL
+  ALTER TABLE dbo.items ADD rack NVARCHAR(50) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'box') IS NULL
+  ALTER TABLE dbo.items ADD box NVARCHAR(50) NULL;
+GO
+IF COL_LENGTH(N'dbo.items', N'cgst_percent') IS NULL
+  ALTER TABLE dbo.items ADD cgst_percent DECIMAL(5,2) NOT NULL CONSTRAINT df_items_cgst DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.items', N'sgst_percent') IS NULL
+  ALTER TABLE dbo.items ADD sgst_percent DECIMAL(5,2) NOT NULL CONSTRAINT df_items_sgst DEFAULT 0;
+GO
+
+-- One-time: split any pre-existing single GST % evenly into CGST / SGST, so re-saving an
+-- old item (which now always sends both) does not silently zero its tax out.
+UPDATE dbo.items SET cgst_percent = gst_percent / 2, sgst_percent = gst_percent / 2
+  WHERE cgst_percent = 0 AND sgst_percent = 0 AND gst_percent > 0;
+GO
+
+-- One-time: give pre-existing items (added before Item Code existed) a code, numbered by id
+-- within their clinic, then move each clinic's "item" sequence past what was just assigned
+-- so the next new item continues cleanly from there. Only touches rows with no code yet.
+IF EXISTS (SELECT 1 FROM dbo.items WHERE item_code IS NULL)
+BEGIN
+  ;WITH numbered AS (
+    SELECT i.id, c.code AS clinic_code, ROW_NUMBER() OVER (PARTITION BY i.clinic_id ORDER BY i.id) AS rn
+      FROM dbo.items i JOIN dbo.clinics c ON c.id = i.clinic_id
+     WHERE i.item_code IS NULL
+  )
+  UPDATE i SET i.item_code = n.clinic_code + N'-I' + RIGHT(N'0000' + CAST(n.rn AS NVARCHAR(4)), 4)
+    FROM dbo.items i JOIN numbered n ON n.id = i.id;
+
+  MERGE dbo.code_sequences AS tgt
+  USING (SELECT clinic_id, COUNT(*) AS n FROM dbo.items WHERE item_code IS NOT NULL GROUP BY clinic_id) AS src
+    ON tgt.clinic_id = src.clinic_id AND tgt.seq_key = N'item'
+  WHEN MATCHED AND tgt.last_value < src.n THEN UPDATE SET last_value = src.n
+  WHEN NOT MATCHED THEN INSERT (clinic_id, seq_key, last_value) VALUES (src.clinic_id, N'item', src.n);
+END
+GO
+
+/* ---------- 6b. DOCTOR: prescription lines ---------- */
+IF OBJECT_ID(N'dbo.prescriptions', N'U') IS NULL
+CREATE TABLE dbo.prescriptions (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_rx_clinic REFERENCES dbo.clinics(id),
+  visit_id       INT NOT NULL CONSTRAINT fk_rx_visit REFERENCES dbo.visits(id),
+  item_id        INT NULL CONSTRAINT fk_rx_item REFERENCES dbo.items(id),      -- NULL = free-text medicine not in stock
+  medicine_name  NVARCHAR(200) NOT NULL,
+  dosage         NVARCHAR(100) NULL,                                           -- "4 pills"
+  frequency      NVARCHAR(100) NULL,                                           -- "1-0-1"
+  duration       NVARCHAR(100) NULL,                                           -- "7 days"
+  quantity       DECIMAL(10,2) NOT NULL DEFAULT 1,
+  instructions   NVARCHAR(300) NULL,
+  issued_qty     DECIMAL(10,2) NOT NULL DEFAULT 0,
+  sort_order     SMALLINT NOT NULL DEFAULT 0
+);
+GO
+
+/* Dosage master (Examine → Prescription → Dosage → "+ Add"): extra dosages a clinic adds to the
+   built-in list (1 Tablet, 2 Tablet, 4 Tablet). */
+IF OBJECT_ID(N'dbo.dosage_master', N'U') IS NULL
+CREATE TABLE dbo.dosage_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_dosage_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  created_by  INT NULL CONSTRAINT fk_dosage_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_dosage_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+-- Order in the dropdown (built-ins are 1, 2, 3); dosages added before this column existed go after them
+IF COL_LENGTH(N'dbo.dosage_master', N'sort_order') IS NULL
+  ALTER TABLE dbo.dosage_master ADD sort_order INT NOT NULL CONSTRAINT df_dosage_order DEFAULT 100;
+GO
+-- 1 = one of the defaults (1 Tablet, 2 Tablet, 4 Tablet) the clinic started with; editable like any other row
+IF COL_LENGTH(N'dbo.dosage_master', N'is_default') IS NULL
+  ALTER TABLE dbo.dosage_master ADD is_default BIT NOT NULL CONSTRAINT df_dosage_default DEFAULT 0;
+GO
+
+/* Potency list (Examine → Prescription → Potency): same behaviour as the dosage list. */
+IF OBJECT_ID(N'dbo.potency_master', N'U') IS NULL
+CREATE TABLE dbo.potency_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_potency_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_potency_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_potency_default DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_potency_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_potency_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+-- potency written on each prescription line (shown before the dosage)
+IF COL_LENGTH(N'dbo.prescriptions', N'potency') IS NULL
+  ALTER TABLE dbo.prescriptions ADD potency NVARCHAR(100) NULL;
+GO
+-- Examine → Prescription → Un Willing (under the medicines): ticked when the patient is unwilling to take the prescription
+IF COL_LENGTH(N'dbo.visits', N'rx_unwilling') IS NULL
+  ALTER TABLE dbo.visits ADD rx_unwilling BIT NOT NULL CONSTRAINT df_visits_rx_unwilling DEFAULT 0;
+GO
+-- Examine → Advice → Un Willing: ticked when the patient is unwilling to follow the advice
+IF COL_LENGTH(N'dbo.visits', N'advice_unwilling') IS NULL
+  ALTER TABLE dbo.visits ADD advice_unwilling BIT NOT NULL CONSTRAINT df_visits_advice_unwilling DEFAULT 0;
+GO
+-- Delete in the Potency / Dosage lists hides the row (is_deleted = 1) so deleted defaults don't come back;
+-- adding the same value again un-hides it.
+IF COL_LENGTH(N'dbo.dosage_master', N'is_deleted') IS NULL
+  ALTER TABLE dbo.dosage_master ADD is_deleted BIT NOT NULL CONSTRAINT df_dosage_deleted DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.potency_master', N'is_deleted') IS NULL
+  ALTER TABLE dbo.potency_master ADD is_deleted BIT NOT NULL CONSTRAINT df_potency_deleted DEFAULT 0;
+GO
+
+/* Repetition list (Examine → Prescription → Repetition, e.g. TDS, QDS, OD, HS): same behaviour as the
+   dosage list. The chosen value is saved in prescriptions.frequency. */
+IF OBJECT_ID(N'dbo.repetition_master', N'U') IS NULL
+CREATE TABLE dbo.repetition_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_repetition_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_repetition_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_repetition_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_repetition_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_repetition_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_repetition_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+/* Do's and Don'ts list (Examine → Advice, e.g. Smoking, Alcohol): same behaviour as the dosage list.
+   What the doctor marks for a visit is saved in visits.dos_donts. */
+IF OBJECT_ID(N'dbo.dosdont_master', N'U') IS NULL
+CREATE TABLE dbo.dosdont_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_dosdont_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_dosdont_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_dosdont_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_dosdont_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_dosdont_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_dosdont_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+/* Past History list (Examine → Complaints & diagnosis, e.g. ENT, Ortho, Dental): same behaviour as the
+   dosage list. What is ticked belongs to the patient (patients.past_history), so it carries to the next visit. */
+IF OBJECT_ID(N'dbo.pasthistory_master', N'U') IS NULL
+CREATE TABLE dbo.pasthistory_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_pasthistory_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_pasthistory_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_pasthistory_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_pasthistory_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_pasthistory_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_pasthistory_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+/* Questions asked when a Past History item is ticked (e.g. ENT → Symptom Character, Triggers, Duration …).
+   One list per item, same behaviour as the dosage list (defaults once, rename / reorder / hide, + New). */
+IF OBJECT_ID(N'dbo.pasthistory_question', N'U') IS NULL
+CREATE TABLE dbo.pasthistory_question (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_phq_clinic REFERENCES dbo.clinics(id),
+  item_id     INT NOT NULL CONSTRAINT fk_phq_item REFERENCES dbo.pasthistory_master(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_phq_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_phq_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_phq_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_phq_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_phq_item_value UNIQUE (item_id, value)
+);
+GO
+/* patients.past_history: where Past History was first kept (one record per patient). No longer used –
+   it is now saved per visit (visits.past_history); the step below moves what was saved here. */
+IF COL_LENGTH(N'dbo.patients', N'past_history') IS NULL
+  ALTER TABLE dbo.patients ADD past_history NVARCHAR(4000) NULL;
+GO
+/* Past History of a visit, as JSON:
+   [{"item":"ENT","note":"Tonsillectomy 2019","answers":[{"q":"Duration","a":"2 years"}]}, …]
+   NULL = never saved for this visit (the screen then starts from the patient's previous visit);
+   '[]' = saved with nothing ticked. */
+IF COL_LENGTH(N'dbo.visits', N'past_history') IS NULL
+  ALTER TABLE dbo.visits ADD past_history NVARCHAR(4000) NULL;
+GO
+/* Medical History list (Examine → Complaints & diagnosis, e.g. Smoking, Alcohol, Tobacco): same behaviour
+   as the dosage list. What is ticked for a visit (with a note each) is saved in visits.medical_history,
+   like Past History: JSON [{"item":"Smoking","note":"10 a day"}, …], NULL = never saved, '[]' = none ticked. */
+IF OBJECT_ID(N'dbo.medhistory_master', N'U') IS NULL
+CREATE TABLE dbo.medhistory_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_medhistory_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_medhistory_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_medhistory_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_medhistory_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_medhistory_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_medhistory_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+IF COL_LENGTH(N'dbo.visits', N'medical_history') IS NULL
+  ALTER TABLE dbo.visits ADD medical_history NVARCHAR(4000) NULL;
+GO
+/* Comparative Study (Examine → Complaints & diagnosis → 5): one running table per patient, each row a
+   reading on its own date with Tine, Rt.H and Lt.H as short text, so readings can be compared over time.
+   visit_id = the visit it was added from (for reference only). */
+IF OBJECT_ID(N'dbo.comparative_study', N'U') IS NULL
+CREATE TABLE dbo.comparative_study (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_cs_clinic REFERENCES dbo.clinics(id),
+  patient_id  INT NOT NULL CONSTRAINT fk_cs_patient REFERENCES dbo.patients(id),
+  visit_id    INT NULL CONSTRAINT fk_cs_visit REFERENCES dbo.visits(id),
+  study_date  DATE NOT NULL,
+  study_time  NVARCHAR(20) NULL,              -- the Tine column, as typed
+  rt_h        NVARCHAR(100) NULL,
+  lt_h        NVARCHAR(100) NULL,
+  created_by  INT NULL CONSTRAINT fk_cs_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_by  INT NULL CONSTRAINT fk_cs_upd REFERENCES dbo.employees(id),
+  updated_at  DATETIME2(0) NULL
+);
+GO
+IF COL_LENGTH(N'dbo.comparative_study', N'study_time') < 40      -- bytes: NVARCHAR(20) = 40
+  ALTER TABLE dbo.comparative_study ALTER COLUMN study_time NVARCHAR(20) NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_cs_patient' AND object_id = OBJECT_ID(N'dbo.comparative_study'))
+  CREATE INDEX ix_cs_patient ON dbo.comparative_study(clinic_id, patient_id, study_date);
+GO
+/* Day Book (Examine → Prescription → Day Book): one row per visit – Routine, Duration, Frequency, each
+   picked from its own clinic list (same behaviour as the dosage list: + New / Edit / Delete). */
+IF OBJECT_ID(N'dbo.dbroutine_master', N'U') IS NULL
+CREATE TABLE dbo.dbroutine_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_dbroutine_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_dbroutine_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_dbroutine_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_dbroutine_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_dbroutine_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_dbroutine_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+IF OBJECT_ID(N'dbo.dbduration_master', N'U') IS NULL
+CREATE TABLE dbo.dbduration_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_dbduration_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_dbduration_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_dbduration_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_dbduration_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_dbduration_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_dbduration_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+IF OBJECT_ID(N'dbo.dbfrequency_master', N'U') IS NULL
+CREATE TABLE dbo.dbfrequency_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_dbfrequency_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_dbfrequency_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_dbfrequency_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_dbfrequency_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_dbfrequency_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_dbfrequency_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+/* Pharmacy → Item → Generic Name / Manufacturer lists (same behaviour as the lists above; a clinic
+   starts with the values its items already use). Items keep the text they were saved with. */
+IF OBJECT_ID(N'dbo.generic_master', N'U') IS NULL
+CREATE TABLE dbo.generic_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_generic_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_generic_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_generic_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_generic_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_generic_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_generic_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+IF OBJECT_ID(N'dbo.manufacturer_master', N'U') IS NULL
+CREATE TABLE dbo.manufacturer_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_manufacturer_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_manufacturer_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_manufacturer_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_manufacturer_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_manufacturer_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_manufacturer_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+-- Pharmacy → Item → Type / Unit list (starts with the units items already use + Bottle, Box, …)
+IF OBJECT_ID(N'dbo.unit_master', N'U') IS NULL
+CREATE TABLE dbo.unit_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_unit_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_unit_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_unit_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_unit_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_unit_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_unit_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+-- Pharmacy → Item → Category list (starts with the categories items already use)
+IF OBJECT_ID(N'dbo.category_master', N'U') IS NULL
+CREATE TABLE dbo.category_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_category_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_category_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_category_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_category_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_category_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_category_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+-- Pharmacy → Item → Potency of the item (its own list, separate from Examine → Prescription → Potency)
+IF COL_LENGTH(N'dbo.items', N'potency') IS NULL
+  ALTER TABLE dbo.items ADD potency NVARCHAR(100) NULL;
+GO
+IF OBJECT_ID(N'dbo.item_potency_master', N'U') IS NULL
+CREATE TABLE dbo.item_potency_master (
+  id          INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id   INT NOT NULL CONSTRAINT fk_item_potency_clinic REFERENCES dbo.clinics(id),
+  value       NVARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL CONSTRAINT df_item_potency_order DEFAULT 100,
+  is_default  BIT NOT NULL CONSTRAINT df_item_potency_default DEFAULT 0,
+  is_deleted  BIT NOT NULL CONSTRAINT df_item_potency_deleted DEFAULT 0,
+  created_by  INT NULL CONSTRAINT fk_item_potency_by REFERENCES dbo.employees(id),
+  created_at  DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_item_potency_clinic_value UNIQUE (clinic_id, value)
+);
+GO
+IF COL_LENGTH(N'dbo.visits', N'daybook_routine') IS NULL
+  ALTER TABLE dbo.visits ADD
+    daybook_routine   NVARCHAR(100) NULL,
+    daybook_duration  NVARCHAR(100) NULL,
+    daybook_frequency NVARCHAR(100) NULL;
+GO
+-- Day Book → Routine is multi-select: saved as a JSON list, e.g. ["Walking","Yoga"]
+IF COL_LENGTH(N'dbo.visits', N'daybook_routine') < 2000      -- bytes: NVARCHAR(1000) = 2000
+  ALTER TABLE dbo.visits ALTER COLUMN daybook_routine NVARCHAR(1000) NULL;
+GO
+-- Day Book → day-wise chart: what is typed in its boxes, as JSON { "2026-10-27|Walking|once": "20 min", … }
+IF COL_LENGTH(N'dbo.visits', N'daybook_chart') IS NULL
+  ALTER TABLE dbo.visits ADD daybook_chart NVARCHAR(MAX) NULL;
+GO
+-- Day Book → Date (the screen fills in today's date)
+IF COL_LENGTH(N'dbo.visits', N'daybook_date') IS NULL
+  ALTER TABLE dbo.visits ADD daybook_date DATE NULL;
+GO
+/* one-time move: a patient's Past History goes onto the patient's latest visit */
+UPDATE v SET past_history = p.past_history
+  FROM dbo.visits v JOIN dbo.patients p ON p.id = v.patient_id
+ WHERE p.past_history IS NOT NULL AND v.past_history IS NULL
+   AND v.id = (SELECT TOP 1 v2.id FROM dbo.visits v2 WHERE v2.patient_id = p.id ORDER BY v2.visit_date DESC, v2.id DESC);
+UPDATE dbo.patients SET past_history = NULL WHERE past_history IS NOT NULL;
+GO
+/* Do's and Don'ts marked for a visit, as JSON: [{"item":"Smoking","rule":"dont"}, …] */
+IF COL_LENGTH(N'dbo.visits', N'dos_donts') IS NULL
+  ALTER TABLE dbo.visits ADD dos_donts NVARCHAR(4000) NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_rx_visit' AND object_id = OBJECT_ID(N'dbo.prescriptions'))
+  CREATE INDEX ix_rx_visit ON dbo.prescriptions(visit_id);
+GO
+
+/* ---------- 7b. PHARMACY: suppliers, stock ledger ---------- */
+IF OBJECT_ID(N'dbo.suppliers', N'U') IS NULL
+CREATE TABLE dbo.suppliers (
+  id              INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id       INT NOT NULL CONSTRAINT fk_suppliers_clinic REFERENCES dbo.clinics(id),
+  name            NVARCHAR(150) NOT NULL,
+  contact_person  NVARCHAR(150) NULL,
+  mobile          NVARCHAR(20)  NULL,
+  email           NVARCHAR(150) NULL,
+  address         NVARCHAR(500) NULL,
+  gstin           NVARCHAR(20)  NULL,
+  status          NVARCHAR(10)  NOT NULL DEFAULT N'active' CONSTRAINT chk_suppliers_status CHECK (status IN (N'active', N'inactive')),
+  created_by      INT NULL,
+  created_at      DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at      DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+IF COL_LENGTH(N'dbo.items', N'supplier_id') IS NULL
+  ALTER TABLE dbo.items ADD supplier_id INT NULL CONSTRAINT fk_items_supplier REFERENCES dbo.suppliers(id);
+GO
+-- Pharmacy → Vendor: State, Pin code, Phone (landline) and the two Drug Licence numbers
+IF COL_LENGTH(N'dbo.suppliers', N'state') IS NULL
+  ALTER TABLE dbo.suppliers ADD state NVARCHAR(50) NULL;
+GO
+IF COL_LENGTH(N'dbo.suppliers', N'pincode') IS NULL
+  ALTER TABLE dbo.suppliers ADD pincode NVARCHAR(10) NULL;
+GO
+IF COL_LENGTH(N'dbo.suppliers', N'phone') IS NULL
+  ALTER TABLE dbo.suppliers ADD phone NVARCHAR(20) NULL;
+GO
+IF COL_LENGTH(N'dbo.suppliers', N'dl_no1') IS NULL
+  ALTER TABLE dbo.suppliers ADD dl_no1 NVARCHAR(50) NULL;
+GO
+IF COL_LENGTH(N'dbo.suppliers', N'dl_no2') IS NULL
+  ALTER TABLE dbo.suppliers ADD dl_no2 NVARCHAR(50) NULL;
+GO
+
+-- Every stock change is logged here (opening, purchase, issue, adjustment, return)
+IF OBJECT_ID(N'dbo.stock_movements', N'U') IS NULL
+CREATE TABLE dbo.stock_movements (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_stock_clinic REFERENCES dbo.clinics(id),
+  item_id        INT NOT NULL CONSTRAINT fk_stock_item REFERENCES dbo.items(id),
+  qty_change     DECIMAL(12,2) NOT NULL,                                        -- +in / -out
+  balance_after  DECIMAL(12,2) NOT NULL,
+  reason         NVARCHAR(12) NOT NULL CONSTRAINT chk_stock_reason CHECK (reason IN (N'opening', N'purchase', N'issue', N'adjustment', N'return')),
+  ref_type       NVARCHAR(30) NULL,
+  ref_id         INT NULL,
+  supplier_id    INT NULL CONSTRAINT fk_stock_supplier REFERENCES dbo.suppliers(id),
+  note           NVARCHAR(300) NULL,
+  created_by     INT NULL,
+  created_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_stock_item' AND object_id = OBJECT_ID(N'dbo.stock_movements'))
+  CREATE INDEX ix_stock_item ON dbo.stock_movements(clinic_id, item_id, created_at);
+GO
+
+/* ---------- 8. BILLING ---------- */
+IF OBJECT_ID(N'dbo.bills', N'U') IS NULL
+CREATE TABLE dbo.bills (
+  id                INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id         INT NOT NULL CONSTRAINT fk_bills_clinic REFERENCES dbo.clinics(id),
+  bill_no           NVARCHAR(25) NOT NULL,                                     -- CLA-B0001 (unique per clinic)
+  patient_id        INT NOT NULL CONSTRAINT fk_bills_patient REFERENCES dbo.patients(id),
+  visit_id          INT NULL CONSTRAINT fk_bills_visit REFERENCES dbo.visits(id),
+  bill_date         DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  consultation_fee  DECIMAL(10,2) NOT NULL DEFAULT 0,
+  items_total       DECIMAL(12,2) NOT NULL DEFAULT 0,
+  other_total       DECIMAL(12,2) NOT NULL DEFAULT 0,
+  discount          DECIMAL(12,2) NOT NULL DEFAULT 0,
+  tax_total         DECIMAL(12,2) NOT NULL DEFAULT 0,
+  net_amount        DECIMAL(12,2) NOT NULL DEFAULT 0,
+  paid_amount       DECIMAL(12,2) NOT NULL DEFAULT 0,
+  payment_mode      NVARCHAR(10) NOT NULL DEFAULT N'cash' CONSTRAINT chk_bills_mode CHECK (payment_mode IN (N'cash', N'card', N'upi', N'other')),
+  status            NVARCHAR(10) NOT NULL DEFAULT N'paid' CONSTRAINT chk_bills_status CHECK (status IN (N'paid', N'partial', N'unpaid', N'cancelled')),
+  notes             NVARCHAR(300) NULL,
+  created_by        INT NULL,
+  created_at        DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at        DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_bills_clinic_no UNIQUE (clinic_id, bill_no)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_bills_date' AND object_id = OBJECT_ID(N'dbo.bills'))
+  CREATE INDEX ix_bills_date ON dbo.bills(clinic_id, bill_date);
+GO
+
+-- Medicines handed over against a visit (reduces stock); billed once
+IF OBJECT_ID(N'dbo.pharmacy_issues', N'U') IS NULL
+CREATE TABLE dbo.pharmacy_issues (
+  id           INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id    INT NOT NULL CONSTRAINT fk_issue_clinic REFERENCES dbo.clinics(id),
+  visit_id     INT NOT NULL CONSTRAINT fk_issue_visit REFERENCES dbo.visits(id),
+  patient_id   INT NOT NULL CONSTRAINT fk_issue_patient REFERENCES dbo.patients(id),
+  items_total  DECIMAL(12,2) NOT NULL DEFAULT 0,
+  status       NVARCHAR(10) NOT NULL DEFAULT N'issued' CONSTRAINT chk_issue_status CHECK (status IN (N'issued', N'billed')),
+  bill_id      INT NULL CONSTRAINT fk_issue_bill REFERENCES dbo.bills(id),
+  issued_by    INT NULL,
+  issued_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME())
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_issue_visit' AND object_id = OBJECT_ID(N'dbo.pharmacy_issues'))
+  CREATE INDEX ix_issue_visit ON dbo.pharmacy_issues(clinic_id, visit_id);
+GO
+
+IF OBJECT_ID(N'dbo.pharmacy_issue_items', N'U') IS NULL
+CREATE TABLE dbo.pharmacy_issue_items (
+  id               INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id        INT NOT NULL CONSTRAINT fk_issue_items_clinic REFERENCES dbo.clinics(id),
+  issue_id         INT NOT NULL CONSTRAINT fk_issue_items_issue REFERENCES dbo.pharmacy_issues(id),
+  prescription_id  INT NULL CONSTRAINT fk_issue_items_rx REFERENCES dbo.prescriptions(id),
+  item_id          INT NOT NULL CONSTRAINT fk_issue_items_item REFERENCES dbo.items(id),
+  qty              DECIMAL(10,2) NOT NULL,
+  rate             DECIMAL(10,2) NOT NULL,
+  gst_percent      DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  amount           DECIMAL(12,2) NOT NULL
+);
+GO
+
+IF OBJECT_ID(N'dbo.bill_items', N'U') IS NULL
+CREATE TABLE dbo.bill_items (
+  id           INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id    INT NOT NULL CONSTRAINT fk_bill_items_clinic REFERENCES dbo.clinics(id),
+  bill_id      INT NOT NULL CONSTRAINT fk_bill_items_bill REFERENCES dbo.bills(id),
+  line_type    NVARCHAR(15) NOT NULL CONSTRAINT chk_bill_items_type CHECK (line_type IN (N'consultation', N'medicine', N'other')),
+  item_id      INT NULL CONSTRAINT fk_bill_items_item REFERENCES dbo.items(id),
+  description  NVARCHAR(200) NOT NULL,
+  qty          DECIMAL(10,2) NOT NULL DEFAULT 1,
+  rate         DECIMAL(10,2) NOT NULL DEFAULT 0,
+  gst_percent  DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  amount       DECIMAL(12,2) NOT NULL DEFAULT 0
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_bill_items_bill' AND object_id = OBJECT_ID(N'dbo.bill_items'))
+  CREATE INDEX ix_bill_items_bill ON dbo.bill_items(bill_id);
+GO
+
+/* ---------- 9. PHARMACY: Purchase / Order (an order placed with a vendor; stock is not changed here) ---------- */
+IF OBJECT_ID(N'dbo.purchase_orders', N'U') IS NULL
+CREATE TABLE dbo.purchase_orders (
+  id            INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id     INT NOT NULL CONSTRAINT fk_po_clinic REFERENCES dbo.clinics(id),
+  po_no         NVARCHAR(20) NOT NULL,
+  supplier_id   INT NOT NULL CONSTRAINT fk_po_supplier REFERENCES dbo.suppliers(id),
+  po_date       DATE NOT NULL,
+  details       NVARCHAR(1000) NULL,
+  total_amount  DECIMAL(12,2) NOT NULL CONSTRAINT df_po_total DEFAULT 0,
+  created_by    INT NULL CONSTRAINT fk_po_by REFERENCES dbo.employees(id),
+  created_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_po_clinic_no UNIQUE (clinic_id, po_no)
+);
+GO
+-- One row per item on the order. Item details are copied in, so the order keeps them if the item changes later.
+-- rate = mrp - mrp × disc_percent / 100; amount = qty × rate; gst_amount = amount / 100 × (cgst + sgst);
+-- total = amount + gst_amount
+IF OBJECT_ID(N'dbo.purchase_order_items', N'U') IS NULL
+CREATE TABLE dbo.purchase_order_items (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_poi_clinic REFERENCES dbo.clinics(id),
+  po_id          INT NOT NULL CONSTRAINT fk_poi_po REFERENCES dbo.purchase_orders(id),
+  item_id        INT NOT NULL CONSTRAINT fk_poi_item REFERENCES dbo.items(id),
+  item_name      NVARCHAR(200) NOT NULL,
+  generic_name   NVARCHAR(150) NULL,
+  hsn_code       NVARCHAR(20)  NULL,
+  manufacturer   NVARCHAR(150) NULL,
+  category       NVARCHAR(100) NULL,
+  pack           NVARCHAR(50)  NULL,
+  mrp            DECIMAL(10,2) NOT NULL DEFAULT 0,
+  disc_percent   DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  rate           DECIMAL(10,2) NOT NULL DEFAULT 0,
+  qty            DECIMAL(10,2) NOT NULL DEFAULT 0,
+  amount         DECIMAL(12,2) NOT NULL DEFAULT 0,
+  cgst_percent   DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  sgst_percent   DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  gst_percent    DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  gst_amount     DECIMAL(12,2) NOT NULL DEFAULT 0,
+  total          DECIMAL(12,2) NOT NULL DEFAULT 0
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_poi_po' AND object_id = OBJECT_ID(N'dbo.purchase_order_items'))
+  CREATE INDEX ix_poi_po ON dbo.purchase_order_items(po_id);
+GO
+
+/* ---------- 10. PHARMACY: Stock In (goods received against a purchase order) ----------
+   Saving adds each line's quantity to the item's stock (stock_movements, ref_type 'stock_in') and makes
+   its Sel.Amount the item's selling price. */
+IF OBJECT_ID(N'dbo.stock_ins', N'U') IS NULL
+CREATE TABLE dbo.stock_ins (
+  id           INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id    INT NOT NULL CONSTRAINT fk_si_clinic REFERENCES dbo.clinics(id),
+  si_no        NVARCHAR(20) NOT NULL,
+  supplier_id  INT NOT NULL CONSTRAINT fk_si_supplier REFERENCES dbo.suppliers(id),
+  po_id        INT NOT NULL CONSTRAINT fk_si_po REFERENCES dbo.purchase_orders(id),
+  si_date      DATE NOT NULL,
+  created_by   INT NULL CONSTRAINT fk_si_by REFERENCES dbo.employees(id),
+  created_at   DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at   DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_si_clinic_no UNIQUE (clinic_id, si_no)
+);
+GO
+-- sel_amount = rate + sales_percent, less disc_percent (shared/stockin.js)
+IF OBJECT_ID(N'dbo.stock_in_items', N'U') IS NULL
+CREATE TABLE dbo.stock_in_items (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_sii_clinic REFERENCES dbo.clinics(id),
+  stock_in_id    INT NOT NULL CONSTRAINT fk_sii_si REFERENCES dbo.stock_ins(id),
+  po_item_id     INT NOT NULL CONSTRAINT fk_sii_poi REFERENCES dbo.purchase_order_items(id),
+  item_id        INT NOT NULL CONSTRAINT fk_sii_item REFERENCES dbo.items(id),
+  item_name      NVARCHAR(200) NOT NULL,
+  batch_no       NVARCHAR(50)  NULL,
+  mfg_date       DATE NULL,
+  exp_date       DATE NULL,
+  qty            DECIMAL(10,2) NOT NULL,
+  rate           DECIMAL(10,2) NOT NULL DEFAULT 0,
+  mrp            DECIMAL(10,2) NOT NULL DEFAULT 0,
+  sales_percent  DECIMAL(6,2)  NOT NULL DEFAULT 0,
+  disc_percent   DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  sel_amount     DECIMAL(10,2) NOT NULL DEFAULT 0
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sii_si' AND object_id = OBJECT_ID(N'dbo.stock_in_items'))
+  CREATE INDEX ix_sii_si ON dbo.stock_in_items(stock_in_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sii_poi' AND object_id = OBJECT_ID(N'dbo.stock_in_items'))
+  CREATE INDEX ix_sii_poi ON dbo.stock_in_items(po_item_id);
+GO
+
+/* ---------- 11. PHARMACY: Return (goods sent back to the vendor, from one Stock In) ----------
+   Saving takes each line's quantity out of the item's stock (stock_movements, reason 'return'). */
+IF OBJECT_ID(N'dbo.purchase_returns', N'U') IS NULL
+CREATE TABLE dbo.purchase_returns (
+  id            INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id     INT NOT NULL CONSTRAINT fk_pr_clinic REFERENCES dbo.clinics(id),
+  return_no     NVARCHAR(20) NOT NULL,
+  supplier_id   INT NOT NULL CONSTRAINT fk_pr_supplier REFERENCES dbo.suppliers(id),
+  stock_in_id   INT NOT NULL CONSTRAINT fk_pr_si REFERENCES dbo.stock_ins(id),
+  return_date   DATE NOT NULL,
+  total_amount  DECIMAL(12,2) NOT NULL CONSTRAINT df_pr_total DEFAULT 0,
+  created_by    INT NULL CONSTRAINT fk_pr_by REFERENCES dbo.employees(id),
+  created_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_pr_clinic_no UNIQUE (clinic_id, return_no)
+);
+GO
+-- amount = qty × rate (the Stock In's Cur.Rate); item / batch details copied from the Stock In line
+IF OBJECT_ID(N'dbo.purchase_return_items', N'U') IS NULL
+CREATE TABLE dbo.purchase_return_items (
+  id                 INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id          INT NOT NULL CONSTRAINT fk_pri_clinic REFERENCES dbo.clinics(id),
+  return_id          INT NOT NULL CONSTRAINT fk_pri_pr REFERENCES dbo.purchase_returns(id),
+  stock_in_item_id   INT NOT NULL CONSTRAINT fk_pri_sii REFERENCES dbo.stock_in_items(id),
+  item_id            INT NOT NULL CONSTRAINT fk_pri_item REFERENCES dbo.items(id),
+  item_name          NVARCHAR(200) NOT NULL,
+  batch_no           NVARCHAR(50) NULL,
+  mfg_date           DATE NULL,
+  exp_date           DATE NULL,
+  qty                DECIMAL(10,2) NOT NULL,
+  rate               DECIMAL(10,2) NOT NULL DEFAULT 0,
+  amount             DECIMAL(12,2) NOT NULL DEFAULT 0
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_pri_pr' AND object_id = OBJECT_ID(N'dbo.purchase_return_items'))
+  CREATE INDEX ix_pri_pr ON dbo.purchase_return_items(return_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_pri_sii' AND object_id = OBJECT_ID(N'dbo.purchase_return_items'))
+  CREATE INDEX ix_pri_sii ON dbo.purchase_return_items(stock_in_item_id);
+GO
+
+/* ---------- 12. PHARMACY: Sales (counter sale to a customer) ----------
+   Saving takes each line's quantity out of the item's stock (stock_movements, reason 'issue', ref_type 'sale').
+   A line may name the batch (Stock In line) it is sold from. */
+IF OBJECT_ID(N'dbo.sales', N'U') IS NULL
+CREATE TABLE dbo.sales (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_sale_clinic REFERENCES dbo.clinics(id),
+  sale_no        NVARCHAR(20) NOT NULL,
+  sale_date      DATE NOT NULL,
+  customer_name  NVARCHAR(150) NOT NULL,
+  mobile         NVARCHAR(20) NULL,
+  total_amount   DECIMAL(12,2) NOT NULL CONSTRAINT df_sale_total DEFAULT 0,
+  created_by     INT NULL CONSTRAINT fk_sale_by REFERENCES dbo.employees(id),
+  created_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_sale_clinic_no UNIQUE (clinic_id, sale_no)
+);
+GO
+-- amount = qty × price
+IF OBJECT_ID(N'dbo.sale_items', N'U') IS NULL
+CREATE TABLE dbo.sale_items (
+  id                INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id         INT NOT NULL CONSTRAINT fk_salei_clinic REFERENCES dbo.clinics(id),
+  sale_id           INT NOT NULL CONSTRAINT fk_salei_sale REFERENCES dbo.sales(id),
+  item_id           INT NOT NULL CONSTRAINT fk_salei_item REFERENCES dbo.items(id),
+  item_name         NVARCHAR(200) NOT NULL,
+  stock_in_item_id  INT NULL CONSTRAINT fk_salei_batch REFERENCES dbo.stock_in_items(id),
+  batch_no          NVARCHAR(50) NULL,
+  exp_date          DATE NULL,
+  qty               DECIMAL(10,2) NOT NULL,
+  price             DECIMAL(10,2) NOT NULL DEFAULT 0,
+  amount            DECIMAL(12,2) NOT NULL DEFAULT 0
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_salei_sale' AND object_id = OBJECT_ID(N'dbo.sale_items'))
+  CREATE INDEX ix_salei_sale ON dbo.sale_items(sale_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_salei_batch' AND object_id = OBJECT_ID(N'dbo.sale_items'))
+  CREATE INDEX ix_salei_batch ON dbo.sale_items(stock_in_item_id);
+GO
+
+/* ---------- 13. PHARMACY: P.Rate, free units, unit-wise sales, bill discount ----------
+   Purchase / Order: Rate = P.Rate less Disc %; Free units come with the rest but are not charged.
+   Stock In: qty = paid units (R.Order), free_qty = free units (R.Free); stock goes up by both.
+   Sales: a line sells packs or single units (sale_unit); qty is always in packs (5 of a 15's pack = 0.3333),
+   so stock quantities keep 4 decimals. Amount = Qty × Rate less Disc %; the bill total is less Bill Discount %. */
+IF COL_LENGTH(N'dbo.purchase_order_items', N'unit') IS NULL
+  ALTER TABLE dbo.purchase_order_items ADD unit NVARCHAR(30) NULL;
+GO
+IF COL_LENGTH(N'dbo.purchase_order_items', N'p_rate') IS NULL
+  ALTER TABLE dbo.purchase_order_items ADD p_rate DECIMAL(10,2) NULL;
+GO
+-- orders saved before P.Rate worked out their rate from the MRP, so that was their P.Rate
+UPDATE dbo.purchase_order_items SET p_rate = mrp WHERE p_rate IS NULL;
+GO
+IF COL_LENGTH(N'dbo.purchase_order_items', N'free_qty') IS NULL
+  ALTER TABLE dbo.purchase_order_items ADD free_qty DECIMAL(10,2) NOT NULL CONSTRAINT df_poi_free DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.stock_in_items', N'free_qty') IS NULL
+  ALTER TABLE dbo.stock_in_items ADD free_qty DECIMAL(10,2) NOT NULL CONSTRAINT df_sii_free DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.sales', N'sub_total') IS NULL
+  ALTER TABLE dbo.sales ADD sub_total DECIMAL(12,2) NULL;
+GO
+UPDATE dbo.sales SET sub_total = total_amount WHERE sub_total IS NULL;
+GO
+IF COL_LENGTH(N'dbo.sales', N'disc_percent') IS NULL
+  ALTER TABLE dbo.sales ADD disc_percent DECIMAL(5,2) NOT NULL CONSTRAINT df_sale_disc DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.sales', N'discount_amount') IS NULL
+  ALTER TABLE dbo.sales ADD discount_amount DECIMAL(12,2) NOT NULL CONSTRAINT df_sale_discamt DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.sale_items', N'sale_unit') IS NULL
+  ALTER TABLE dbo.sale_items ADD sale_unit NVARCHAR(4) NOT NULL CONSTRAINT df_salei_unit DEFAULT N'pack'
+    CONSTRAINT chk_salei_unit CHECK (sale_unit IN (N'pack', N'unit'));
+GO
+IF COL_LENGTH(N'dbo.sale_items', N'unit_qty') IS NULL
+  ALTER TABLE dbo.sale_items ADD unit_qty DECIMAL(10,2) NULL;   -- the quantity as typed (packs or units)
+GO
+UPDATE dbo.sale_items SET unit_qty = qty WHERE unit_qty IS NULL;
+GO
+IF COL_LENGTH(N'dbo.sale_items', N'pack_size') IS NULL
+  ALTER TABLE dbo.sale_items ADD pack_size DECIMAL(10,2) NOT NULL CONSTRAINT df_salei_pack DEFAULT 1;
+GO
+IF COL_LENGTH(N'dbo.sale_items', N'disc_percent') IS NULL
+  ALTER TABLE dbo.sale_items ADD disc_percent DECIMAL(5,2) NOT NULL CONSTRAINT df_salei_disc DEFAULT 0;
+GO
+-- quantities in packs keep 4 decimals (a unit sale takes a part of a pack)
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.sale_items') AND name = N'qty' AND scale < 4)
+  ALTER TABLE dbo.sale_items ALTER COLUMN qty DECIMAL(12,4) NOT NULL;
+GO
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.stock_movements') AND name = N'qty_change' AND scale < 4)
+  ALTER TABLE dbo.stock_movements ALTER COLUMN qty_change DECIMAL(12,4) NOT NULL;
+GO
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.stock_movements') AND name = N'balance_after' AND scale < 4)
+  ALTER TABLE dbo.stock_movements ALTER COLUMN balance_after DECIMAL(12,4) NOT NULL;
+GO
+-- items.stock_qty: its default and check have to come off while the column changes
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.items') AND name = N'stock_qty' AND scale < 4)
+BEGIN
+  DECLARE @df SYSNAME = (SELECT d.name FROM sys.default_constraints d JOIN sys.columns c
+                           ON c.object_id = d.parent_object_id AND c.column_id = d.parent_column_id
+                          WHERE d.parent_object_id = OBJECT_ID(N'dbo.items') AND c.name = N'stock_qty');
+  IF @df IS NOT NULL EXEC (N'ALTER TABLE dbo.items DROP CONSTRAINT ' + @df);
+  IF OBJECT_ID(N'dbo.chk_items_stock', N'C') IS NOT NULL ALTER TABLE dbo.items DROP CONSTRAINT chk_items_stock;
+  ALTER TABLE dbo.items ALTER COLUMN stock_qty DECIMAL(12,4) NOT NULL;
+  ALTER TABLE dbo.items ADD CONSTRAINT df_items_stock DEFAULT 0 FOR stock_qty;
+  ALTER TABLE dbo.items ADD CONSTRAINT chk_items_stock CHECK (stock_qty >= 0);
+END
+GO
+-- batch stock lookups (Sales) go by item
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sii_item' AND object_id = OBJECT_ID(N'dbo.stock_in_items'))
+  CREATE INDEX ix_sii_item ON dbo.stock_in_items(item_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_pri_item' AND object_id = OBJECT_ID(N'dbo.purchase_return_items'))
+  CREATE INDEX ix_pri_item ON dbo.purchase_return_items(item_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_salei_item' AND object_id = OBJECT_ID(N'dbo.sale_items'))
+  CREATE INDEX ix_salei_item ON dbo.sale_items(item_id);
+GO
+
+/* ---------- 14. PHARMACY: Sales Return (goods a customer brings back from one sale) ----------
+   Saving puts each line's packs back into the item's stock and its batch (stock_movements, reason 'issue',
+   ref_type 'sales_return', a positive change – so the Stock Report's Sold is net of returns).
+   A line returns at most what its sale line sold less earlier returns; the refund keeps the sale's
+   line Disc % and Bill Discount %. A sale with a return can no longer be edited. */
+IF OBJECT_ID(N'dbo.sales_returns', N'U') IS NULL
+CREATE TABLE dbo.sales_returns (
+  id             INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id      INT NOT NULL CONSTRAINT fk_sr_clinic REFERENCES dbo.clinics(id),
+  sr_no          NVARCHAR(20) NOT NULL,
+  sale_id        INT NOT NULL CONSTRAINT fk_sr_sale REFERENCES dbo.sales(id),
+  return_date    DATE NOT NULL,
+  reason         NVARCHAR(300) NULL,
+  total_amount   DECIMAL(12,2) NOT NULL CONSTRAINT df_sr_total DEFAULT 0,
+  created_by     INT NULL CONSTRAINT fk_sr_by REFERENCES dbo.employees(id),
+  created_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at     DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_sr_clinic_no UNIQUE (clinic_id, sr_no)
+);
+GO
+-- qty = packs back into stock; unit_qty = the quantity as typed (in the sale line's Sell by unit)
+IF OBJECT_ID(N'dbo.sales_return_items', N'U') IS NULL
+CREATE TABLE dbo.sales_return_items (
+  id                INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id         INT NOT NULL CONSTRAINT fk_sri_clinic REFERENCES dbo.clinics(id),
+  sr_id             INT NOT NULL CONSTRAINT fk_sri_sr REFERENCES dbo.sales_returns(id),
+  sale_item_id      INT NOT NULL CONSTRAINT fk_sri_salei REFERENCES dbo.sale_items(id),
+  item_id           INT NOT NULL CONSTRAINT fk_sri_item REFERENCES dbo.items(id),
+  item_name         NVARCHAR(200) NOT NULL,
+  stock_in_item_id  INT NULL CONSTRAINT fk_sri_batch REFERENCES dbo.stock_in_items(id),
+  batch_no          NVARCHAR(50) NULL,
+  exp_date          DATE NULL,
+  sale_unit         NVARCHAR(4) NOT NULL DEFAULT N'pack',
+  pack_size         DECIMAL(10,2) NOT NULL DEFAULT 1,
+  unit_qty          DECIMAL(10,2) NOT NULL,
+  qty               DECIMAL(12,4) NOT NULL,
+  price             DECIMAL(10,2) NOT NULL DEFAULT 0,
+  disc_percent      DECIMAL(5,2)  NOT NULL DEFAULT 0,
+  amount            DECIMAL(12,2) NOT NULL DEFAULT 0
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sri_sr' AND object_id = OBJECT_ID(N'dbo.sales_return_items'))
+  CREATE INDEX ix_sri_sr ON dbo.sales_return_items(sr_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sri_salei' AND object_id = OBJECT_ID(N'dbo.sales_return_items'))
+  CREATE INDEX ix_sri_salei ON dbo.sales_return_items(sale_item_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sri_batch' AND object_id = OBJECT_ID(N'dbo.sales_return_items'))
+  CREATE INDEX ix_sri_batch ON dbo.sales_return_items(stock_in_item_id);
+GO
+
+/* ---------- 15. PHARMACY: Stock Adjustment (corrects stock: count differences, breakage, expiry) ----------
+   A line adds (In) or takes out (Out) packs of an item, from one of its batches or from stock with no batch.
+   Saving moves the item's stock (stock_movements, reason 'adjustment', ref_type 'stock_adjustment');
+   no batch and no item may go below zero. An edit applies only the change. */
+IF OBJECT_ID(N'dbo.stock_adjustments', N'U') IS NULL
+CREATE TABLE dbo.stock_adjustments (
+  id           INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id    INT NOT NULL CONSTRAINT fk_adj_clinic REFERENCES dbo.clinics(id),
+  adj_no       NVARCHAR(20) NOT NULL,
+  adj_date     DATE NOT NULL,
+  remarks      NVARCHAR(300) NULL,
+  in_total     DECIMAL(12,2) NOT NULL CONSTRAINT df_adj_in DEFAULT 0,
+  out_total    DECIMAL(12,2) NOT NULL CONSTRAINT df_adj_out DEFAULT 0,
+  created_by   INT NULL CONSTRAINT fk_adj_by REFERENCES dbo.employees(id),
+  created_at   DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  updated_at   DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_adj_clinic_no UNIQUE (clinic_id, adj_no)
+);
+GO
+-- in_qty / out_qty in packs (one of them per line); rate = purchase price per pack; amount = qty × rate
+IF OBJECT_ID(N'dbo.stock_adjustment_items', N'U') IS NULL
+CREATE TABLE dbo.stock_adjustment_items (
+  id                INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id         INT NOT NULL CONSTRAINT fk_adji_clinic REFERENCES dbo.clinics(id),
+  adjustment_id     INT NOT NULL CONSTRAINT fk_adji_adj REFERENCES dbo.stock_adjustments(id),
+  item_id           INT NOT NULL CONSTRAINT fk_adji_item REFERENCES dbo.items(id),
+  item_name         NVARCHAR(200) NOT NULL,
+  stock_in_item_id  INT NULL CONSTRAINT fk_adji_batch REFERENCES dbo.stock_in_items(id),
+  batch_no          NVARCHAR(50) NULL,
+  exp_date          DATE NULL,
+  in_qty            DECIMAL(12,4) NOT NULL DEFAULT 0,
+  out_qty           DECIMAL(12,4) NOT NULL DEFAULT 0,
+  rate              DECIMAL(10,2) NOT NULL DEFAULT 0,
+  amount            DECIMAL(12,2) NOT NULL DEFAULT 0
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_adji_adj' AND object_id = OBJECT_ID(N'dbo.stock_adjustment_items'))
+  CREATE INDEX ix_adji_adj ON dbo.stock_adjustment_items(adjustment_id);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_adji_batch' AND object_id = OBJECT_ID(N'dbo.stock_adjustment_items'))
+  CREATE INDEX ix_adji_batch ON dbo.stock_adjustment_items(stock_in_item_id);
+GO
+
+/* ---------- 16. PHARMACY: Vendor Payments (money paid to a vendor against one Stock In = its invoice) ----------
+   Invoice Total = Σ paid qty × Cur.Rate + the order line's GST; Returns = the Returns made from it (+ GST),
+   as on the Vendor Payments report. Balance = Total − Returns − Paid; a payment can't be more than the
+   balance. Only an Admin may delete a payment. */
+IF OBJECT_ID(N'dbo.vendor_payments', N'U') IS NULL
+CREATE TABLE dbo.vendor_payments (
+  id            INT IDENTITY(1,1) PRIMARY KEY,
+  clinic_id     INT NOT NULL CONSTRAINT fk_vp_clinic REFERENCES dbo.clinics(id),
+  vp_no         NVARCHAR(20) NOT NULL,
+  supplier_id   INT NOT NULL CONSTRAINT fk_vp_supplier REFERENCES dbo.suppliers(id),
+  stock_in_id   INT NOT NULL CONSTRAINT fk_vp_si REFERENCES dbo.stock_ins(id),
+  pay_date      DATE NOT NULL,
+  amount        DECIMAL(12,2) NOT NULL,
+  pay_mode      NVARCHAR(15) NOT NULL CONSTRAINT chk_vp_mode CHECK (pay_mode IN (N'cash', N'upi', N'bank', N'cheque', N'card')),
+  reference_no  NVARCHAR(50) NULL,
+  notes         NVARCHAR(300) NULL,
+  created_by    INT NULL CONSTRAINT fk_vp_by REFERENCES dbo.employees(id),
+  created_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_vp_clinic_no UNIQUE (clinic_id, vp_no)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_vp_si' AND object_id = OBJECT_ID(N'dbo.vendor_payments'))
+  CREATE INDEX ix_vp_si ON dbo.vendor_payments(stock_in_id);
+GO
+
+/* ---------- 17. Menu Access: Full / View / No Access per employee and pharmacy page (key 'pharmacy.*') ----------
+   Only saved choices are stored; a page with no row starts from the employee's permissions
+   (shared/menuAccess.js). Keys must never be renamed: these rows depend on them. */
+IF OBJECT_ID(N'dbo.menu_access', N'U') IS NULL
+CREATE TABLE dbo.menu_access (
+  id            INT IDENTITY(1,1) PRIMARY KEY,
+  employee_id   INT NOT NULL CONSTRAINT fk_ma_emp REFERENCES dbo.employees(id),
+  menu_key      NVARCHAR(100) NOT NULL,
+  access_level  NVARCHAR(4) NOT NULL CONSTRAINT chk_ma_level CHECK (access_level IN (N'full', N'view', N'none')),
+  updated_by    INT NULL,
+  updated_at    DATETIME2(0) NOT NULL DEFAULT DATEADD(MINUTE, 330, SYSUTCDATETIME()),
+  CONSTRAINT uq_ma_emp_key UNIQUE (employee_id, menu_key)
+);
+GO

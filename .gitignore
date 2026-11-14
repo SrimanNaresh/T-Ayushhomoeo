@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+backend/.db-ready
+deploy/last-deploy.log
+deploy/last-fix.log
+__pycache__/
+
+# kept on this PC only: server address / login defaults, and old zip backups
+deploy/
+backups/

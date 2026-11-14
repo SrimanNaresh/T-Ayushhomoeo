@@ -1,0 +1,73 @@
+@echo off
+setlocal
+cd /d "%~dp0"
+title SmartClinic
+
+rem ===== Change the port here (the app opens at http://localhost:PORT) =====
+set APP_PORT=5180
+rem ==========================================================================
+
+where node >nul 2>nul
+if errorlevel 1 (
+  echo Node.js is not installed. Install the LTS version from https://nodejs.org and run this again.
+  pause
+  exit /b 1
+)
+
+if not exist "backend\node_modules\tedious\index.js" (
+  echo The folder backend\node_modules is missing. Unzip the full multi-branch_clinic.zip again.
+  pause
+  exit /b 1
+)
+
+if not exist "backend\.env" (
+  copy "backend\.env.example" "backend\.env" >nul
+  echo.
+  echo First run: Notepad will open backend\.env
+  echo Set DB_HOST, DB_USER, DB_PASSWORD and DB_NAME for your SQL Server.
+  echo For ONE clinic set SINGLE_CLINIC=1, CLINIC_CODE ^(e.g. SC^) and CLINIC_NAME. Leave SINGLE_CLINIC=0 for branches.
+  echo Then SAVE and CLOSE Notepad.
+  start /wait notepad "backend\.env"
+)
+
+rem Tables are checked on every start (safe to repeat) so database updates in a new version are applied
+echo.
+echo Checking the SmartClinic tables in SQL Server...
+pushd backend
+node scripts\init-db.js
+if errorlevel 1 goto dbfail
+popd
+
+if not exist "backend\.db-ready" (
+  echo.
+  echo Adding the SmartClinic demo data...
+  pushd backend
+  node scripts\seed.js
+  if errorlevel 1 goto dbfail
+  echo ok> .db-ready
+  popd
+)
+
+echo.
+start "" cmd /c "timeout /t 3 >nul & start http://localhost:%APP_PORT%"
+cd backend
+set PORT=%APP_PORT%
+set CORS_ORIGIN=http://localhost:%APP_PORT%
+echo Login: Admin / Admin@123    Demo staff ^(password Demo@123^): cla.* for branches, or CLINIC_CODE.* e.g. sc.reception in single-clinic mode
+echo.
+node src\server.js
+echo.
+echo SmartClinic stopped. If you see an error above, send a screenshot of this window to Claude.
+pause
+exit /b 0
+
+:dbfail
+popd
+echo.
+echo Could not set up the database.
+echo  - Make sure SQL Server is running and this PC can reach it (port 1433).
+echo  - Check DB_HOST / DB_USER / DB_PASSWORD / DB_NAME in backend\.env  (opening it now)
+start notepad "backend\.env"
+echo Then run start-windows.bat again. If it still fails, send a screenshot of this window to Claude.
+pause
+exit /b 1
