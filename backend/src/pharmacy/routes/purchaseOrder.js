@@ -16,8 +16,9 @@ router.use(clinicScope());   // read / write access: pharmacy/index.js
 const MAX_LINES = 200;
 const ITEM_COPY = ['generic_name', 'hsn_code', 'manufacturer', 'category', 'pack', 'unit'];
 
-/** Checks the order and its lines; each line takes the item's details from the item itself. */
-async function clean(body, clinicId) {
+/** Checks the order and its lines; each line takes the item's details from the item itself. (Also used by the
+ * Three in One edit in stockIn.js.) */
+export async function clean(body, clinicId) {
   const supplierId = toId(body?.supplier_id, 'vendor');
   const [s] = await query('SELECT id FROM suppliers WHERE id = ? AND clinic_id = ?', [supplierId, clinicId]);
   if (!s) throw badRequest('Choose a vendor', 'VALIDATION');

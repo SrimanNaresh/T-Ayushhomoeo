@@ -26,6 +26,7 @@ import { calcLine, discOf, priced, roundOffOf, splitGst } from '../../../../../s
 import { selAmount } from '../../../../../shared/stockin.js';
 import ScanBillModal from './ScanBillModal.jsx';
 import NewVendorBox, { vendorDetails } from './NewVendorBox.jsx';
+import ItemFormModal from './ItemFormModal.jsx';
 import { compact, likeness } from '../utils/billScan.js';
 
 const MAX_GST = 28;
@@ -85,6 +86,11 @@ function withItem(r, i, onlyEmpty = false) {
   return patch;
 }
 
+// An item's own fields as the row shows them (an edit saves the ones changed back to the item)
+const ITEM_FIELDS = [['generic', 'generic_name'], ['manufacturer', 'manufacturer'], ['hsn', 'hsn_code'], ['category', 'category'],
+  ['pack', 'pack'], ['unit', 'unit'], ['rack', 'rack']];
+const itemPart = (r) => JSON.stringify([...ITEM_FIELDS.map(([f]) => String(r[f] || '').trim()), num(r.mrp), num(r.p_rate), num(r.gst)]);
+
 /** What is wrong with a row: [i18n key, params], or null (same checks as the servers) */
 function rowProblem(r, firstOf) {
   if (!compact(r.name)) return ['ips.lineName'];
@@ -123,7 +129,8 @@ const ro = 'px-1 text-right tabular-nums text-ink-600';
 const freeze0 = 'sticky left-0 z-10 w-8 min-w-[2rem]';
 const freeze1 = 'sticky left-8 z-10';
 
-export default function StockIps() {
+export default function StockIps({ params = {} }) {
+  const editId = params.id;   // /pharmacy/stock-ips/:id – a saved Three in One entry (its Stock In), opened to change it
   const { t } = useT();
   const toast = useToast();
   const [head, setHead] = useState(EMPTY_HEAD);
@@ -138,7 +145,74 @@ export default function StockIps() {
   const vendors = useAsync(() => api('/pharmacy/vendors', { query: { status: 'active' } }), []);
   const vendorRows = [...added.filter((a) => !(vendors.data?.rows || []).some((v) => v.id === a.id)), ...(vendors.data?.rows || [])]
     .sort((a, b) => a.name.localeCompare(b.name));
-  const locked = !!savedOrder;   // the order is saved: only the Stock In columns can still change
+  const [editing, setEditing] = useState(null);       // the saved entry being changed: { si_no, po_no, locked }
+  const [loading, setLoading] = useState(!!editId);
+  const locked = !!savedOrder || !!editing?.locked;   // order saved (or the entry can no longer change): Stock In columns only / nothing
+  const [itemForm, setItemForm] = useState(null);     // item popup: { name, key } (add) | { id, key } (edit)
+
+  // Edit: load the Stock In and its order into the screen – one row per order line, with the item's details
+  useEffect(() => {
+    if (!editId) return undefined;
+    let live = true;
+    (async () => {
+      try {
+        const si = await api(`/pharmacy/stock-ins/${editId}`);
+        const po = await api(`/pharmacy/purchase-orders/${si.po_id}`);
+        const items = new Map((await Promise.all([...new Set(po.lines.map((l) => l.item_id))]
+          .map((id) => api(`/pharmacy/item-master/${id}`).catch(() => null)))).filter(Boolean).map((i) => [i.id, i]));
+        const byPoLine = new Map(si.lines.map((l) => [l.po_item_id, l]));
+        const loaded = po.lines.map((l) => {
+          const s = byPoLine.get(l.id) || {};
+          const i = items.get(l.item_id) || {};
+          const r = {
+            ...newRow(), item_id: l.item_id, item_code: i.item_code || '', name: l.item_name,
+            generic: i.generic_name || l.generic_name || '', manufacturer: i.manufacturer || l.manufacturer || '', hsn: i.hsn_code || l.hsn_code || '',
+            category: i.category || l.category || '', pack: i.pack || l.pack || '', unit: i.unit || l.unit || '', rack: i.rack || '',
+            mrp: numStr(l.mrp), p_rate: numStr(l.p_rate ?? l.rate), disc: numStr(l.disc_percent), qty: numStr(l.qty), free: numStr(l.free_qty),
+            gst: numStr(num(l.cgst_percent) + num(l.sgst_percent)), batch: s.batch_no || '', mfg: monthToMMYY(s.mfg_date), exp: monthToMMYY(s.exp_date),
+            s_disc: numStr(s.disc_percent),
+          };
+          return { ...r, saved: itemPart(r) };   // what the item had, to save only what changes
+        });
+        if (!live) return;
+        setRows(loaded.length ? loaded : [newRow()]);
+        const billNote = `${t('menu.threeInOne')} · ${t('ips.billNo')}: `;
+        setHead({
+          supplier_id: String(si.supplier_id), date: String(si.si_date).slice(0, 10), bill_no: si.bill_no || '',
+          details: String(po.details || '').split('\n').filter((x) => !x.startsWith(billNote)).join('\n'),
+        });
+        setRoundOn(Number(po.round_off) !== 0);
+        setEditing({ si_no: si.si_no, po_no: po.po_no, locked: si.locked || null });
+      } catch (err) {
+        if (live) toast(err.message || t('common.loadFailed'), 'error');
+      } finally {
+        if (live) setLoading(false);
+      }
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editId]);
+
+  // the item popup (✎ / + Add new item in the Item Name box): a new item goes on its row; an edited one updates
+  // every row holding it (prices and quantities stay)
+  const itemBoxProps = (r) => ({
+    onNew: (typed) => setItemForm({ name: typed, key: r.key }),
+    onEdit: (item) => setItemForm({ id: item.id, key: r.key }),
+  });
+  function itemSaved(item, isNew) {
+    if (isNew) {
+      setRows((rs) => rs.map((x) => (x.key === itemForm.key ? { ...x, ...withItem(x, item) } : x)));
+    } else {
+      setRows((rs) => rs.map((x) => {
+        if (x.item_id !== item.id) return x;
+        const next = { ...x, name: item.name, item_code: item.item_code || '' };
+        for (const [f, k] of ITEM_FIELDS) next[f] = item[k] ? String(item[k]) : '';
+        return { ...next, saved: itemPart(next) };
+      }));
+    }
+    toast(t(isNew ? 'common.savedX' : 'common.updatedX', { x: item.name }));
+    setItemForm(null);
+  }
 
   const setRow = (key, patch) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
   const removeRow = (key) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow()]));
@@ -248,13 +322,22 @@ export default function StockIps() {
     return bad >= 0 ? problemText(view[bad].problem, bad) : null;
   }
 
-  const reset = () => { setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); setRoundOn(true); setNewVendor(null); setShowDetails(false); };
+  const reset = () => {
+    if (editId) { navigate('/pharmacy/stock-in-list'); return; }
+    setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); setRoundOn(true); setNewVendor(null); setShowDetails(false);
+  };
+  const itemBody = (r) => ({
+    name: r.name.trim(), generic_name: r.generic.trim(), manufacturer: r.manufacturer.trim(), hsn_code: r.hsn.trim().toUpperCase(),
+    category: r.category.trim(), pack: r.pack.trim(), unit: r.unit.trim() || 'nos', rack: r.rack.trim(),
+    mrp: r.mrp, purchase_rate: r.p_rate, ...splitGst(r.gst),
+  });
 
   async function submit(e) {
     e.preventDefault();
     const problem = validate();
     if (problem) return toast(problem, 'error');
     const lines = usedRows.map((v) => v.r);
+    if (editId) return saveEdit(lines);
     let order = savedOrder;
     let newItems = 0;
     try {
@@ -267,12 +350,7 @@ export default function StockIps() {
           if (found) { ids.set(r.key, found.id); setRow(r.key, { item_id: found.id, item_code: found.item_code || '' }); continue; }
           const item = await api('/pharmacy/item-master', {
             method: 'POST',
-            body: {
-              name: r.name.trim(), generic_name: r.generic.trim(), manufacturer: r.manufacturer.trim(), hsn_code: r.hsn.trim().toUpperCase(),
-              category: r.category.trim(), pack: r.pack.trim(), unit: r.unit.trim() || 'nos', rack: r.rack.trim(),
-              mrp: r.mrp, purchase_rate: r.p_rate, ...splitGst(r.gst),
-              price: selAmount({ mrp: r.mrp, disc_percent: r.s_disc }), supplier_id: head.supplier_id, status: 'active',
-            },
+            body: { ...itemBody(r), price: selAmount({ mrp: r.mrp, disc_percent: r.s_disc }), supplier_id: head.supplier_id, status: 'active' },
           });
           newItems += 1;
           ids.set(r.key, item.id);
@@ -314,6 +392,45 @@ export default function StockIps() {
       setSaving('');
     }
     return undefined;
+  }
+
+  // Edit: new rows' items are added (or linked), changed items saved, then the order and the Stock In in one go
+  async function saveEdit(lines) {
+    try {
+      setSaving('ips.stepItems');
+      const ids = new Map(lines.filter((r) => r.item_id).map((r) => [r.key, r.item_id]));
+      for (const r of lines) {
+        if (r.item_id) {
+          if (r.saved && r.saved !== itemPart(r)) await api(`/pharmacy/item-master/${r.item_id}`, { method: 'PUT', body: itemBody(r) });
+          continue;
+        }
+        const found = await findItem(r);
+        const item = found || await api('/pharmacy/item-master', {
+          method: 'POST',
+          body: { ...itemBody(r), price: selAmount({ mrp: r.mrp, disc_percent: r.s_disc }), supplier_id: head.supplier_id, status: 'active' },
+        });
+        ids.set(r.key, item.id);
+        setRow(r.key, { item_id: item.id, item_code: item.item_code || '', saved: itemPart(r) });
+      }
+      setSaving('ips.stepStock');
+      const si = await api(`/pharmacy/stock-ins/${editId}/ips`, {
+        method: 'PUT',
+        body: {
+          supplier_id: head.supplier_id, po_date: head.date, round_off: roundOn, bill_no: head.bill_no.trim().toUpperCase(),
+          details: [head.details.trim(), `${t('menu.threeInOne')} · ${t('ips.billNo')}: ${head.bill_no.trim().toUpperCase()}`].filter(Boolean).join('\n'),
+          lines: lines.map((r) => ({
+            item_id: ids.get(r.key), mrp: r.mrp, p_rate: r.p_rate, disc_percent: r.disc || 0, qty: r.qty, free_qty: r.free || 0, ...splitGst(r.gst),
+            batch_no: r.batch.trim().toUpperCase(), mfg_date: mmyyToMonth(r.mfg), exp_date: mmyyToMonth(r.exp), s_disc: r.s_disc || 0,
+          })),
+        },
+      });
+      toast(t('ips.updated', { si: si.si_no }));
+      navigate('/pharmacy/stock-in-list');
+    } catch (err) {
+      toast(err.message || t('common.saveFailed'), 'error');
+    } finally {
+      setSaving('');
+    }
   }
 
   const box = (r, field, props = {}) => (
@@ -370,7 +487,8 @@ export default function StockIps() {
   return (
     <div className="card max-md:!px-3">
       <form onSubmit={submit} noValidate>
-        <CardHeader icon={Layers} title={t('menu.threeInOne')} subtitle={<span className="hidden md:inline">{t('ips.hint')}</span>}
+        <CardHeader icon={Layers} title={editing ? t('ips.editTitle', { no: editing.si_no }) : t('menu.threeInOne')}
+          subtitle={editing ? t('ips.editHint', { po: editing.po_no }) : <span className="hidden md:inline">{t('ips.hint')}</span>}
           actions={(
             <div className="flex gap-2">
               <button type="button" className="btn-secondary" disabled={locked || !!saving} title={t('ips.scanHint')} onClick={() => setScanOpen(true)}>
@@ -383,6 +501,8 @@ export default function StockIps() {
           )} />
 
         {savedOrder && <Note tone="warning" className="mb-3">{t('ips.orderSaved', { po: savedOrder.po_no })}</Note>}
+        {editing?.locked && <Note tone="warning" className="mb-3">{editing.locked}</Note>}
+        {loading && <Note className="mb-3">{t('common.loading')}</Note>}
 
         <div className={`grid grid-cols-1 gap-3 ${showDetails ? 'md:grid-cols-[minmax(14rem,3fr)_minmax(9rem,1fr)_minmax(10rem,1fr)_minmax(14rem,3fr)]' : 'md:grid-cols-[minmax(14rem,3fr)_minmax(9rem,1fr)_minmax(10rem,1fr)_auto]'}`}>
           <VendorPicker label={t('purchase.vendor')} required vendors={vendorRows} value={head.supplier_id}
@@ -431,10 +551,10 @@ export default function StockIps() {
                   onChange={(e) => (extra.price ? setPrice(r, f, e.target.value) : setRow(r.key, { [f]: extra.mmyy ? typeMMYY(e.target.value) : e.target.value }))} />
               </CardField>
             );
-            const detail = !!r.item_id || locked;
+            const detail = locked || (!!r.item_id && !editId);
             return (
               <ItemCard key={r.key} no={n + 1} bad={!!problem}
-                title={locked ? r.name : <ItemPicker value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />}
+                title={locked ? r.name : <ItemPicker value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} {...itemBoxProps(r)} />}
                 sub={problem ? problemText(problem, n) : (used && compact(r.name) ? (r.item_id ? t('ips.inList', { code: r.item_code || r.item_id }) : t('ips.newItem')) : '')}
                 tag={calc.total ? money(calc.total) : undefined}>
                 {!detail && (
@@ -538,7 +658,7 @@ export default function StockIps() {
                 const bg = problem ? 'bg-red-50' : 'bg-white';
                 const ctx = {
                   ...v,
-                  detail: !!r.item_id || locked,   // an existing item's details come from the Item List
+                  detail: locked || (!!r.item_id && !editId),   // new: an existing item's details come from the Item List; edit: fixable
                   bad: (key) => (problem?.[0] === key ? GRID_BAD : ''),
                   oldPrice: r.item_id && head.supplier_id ? Number(oldPrices.data?.[r.item_id] || 0) : null,
                 };
@@ -547,7 +667,7 @@ export default function StockIps() {
                     <td className={`${cell} ${freeze0} ${bg} text-center text-ink-400`}>{n + 1}</td>
                     <td data-col="name" className={`${cell} ${freeze1} ${bg}`}>
                       {locked ? <span className="block px-1.5 py-1">{r.name}</span> : (
-                        <ItemPicker inputClass={`${GRID_INPUT} ${ctx.bad('ips.lineName')} ${ctx.bad('ips.lineRepeat')}`} value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />
+                        <ItemPicker inputClass={`${GRID_INPUT} ${ctx.bad('ips.lineName')} ${ctx.bad('ips.lineRepeat')}`} value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} {...itemBoxProps(r)} />
                       )}
                       {status(r, used)}
                       {problem && <span className="block px-1.5 text-10 text-red-600">{problemText(problem, n)}</span>}
@@ -583,13 +703,14 @@ export default function StockIps() {
             {!locked && <button type="button" className="btn-ghost !px-2 !py-1 text-13 max-md:hidden" onClick={() => setRows((rs) => [...rs, newRow()])}><Plus size={15} /> {t('ips.addRow')}</button>}
           </div>
           <div className="flex gap-2">
-            <button type="button" className="btn-secondary px-2 sm:px-4" onClick={reset} disabled={!!saving}><X size={16} /> {locked ? t('ips.startOver') : t('ips.clear')}</button>
-            <button type="submit" className="btn-primary px-2 sm:px-4" disabled={!!saving}>
-              <Save size={16} /> {saving ? t('common.saving') : locked ? t('ips.saveStock') : t('ips.saveAll')}
+            <button type="button" className="btn-secondary px-2 sm:px-4" onClick={reset} disabled={!!saving}><X size={16} /> {editId ? t('common.cancel') : locked ? t('ips.startOver') : t('ips.clear')}</button>
+            <button type="submit" className="btn-primary px-2 sm:px-4" disabled={!!saving || loading || !!editing?.locked}>
+              <Save size={16} /> {saving ? t('common.saving') : editId ? t('ips.saveChanges') : locked ? t('ips.saveStock') : t('ips.saveAll')}
             </button>
           </div>
         </div>
       </form>
+      <ItemFormModal target={itemForm} onClose={() => setItemForm(null)} onSaved={itemSaved} />
       <ScanBillModal open={scanOpen} onClose={() => setScanOpen(false)} onLines={fromBill} />
     </div>
   );

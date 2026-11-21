@@ -75,7 +75,9 @@ export default function StockInList() {
   }
   const actions = (r) => (
     <>
-      <RowAction icon={Pencil} title={t('common.edit')} onClick={() => navigate(`/pharmacy/stock-in/${r.stock_in_id}`)} />
+      {/* the only Stock In of its order (as Three in One saves): change it all in Three in One; else on Stock In */}
+      <RowAction icon={Pencil} title={r.ips_edit ? t('stockin.editIps') : t('common.edit')}
+        onClick={() => navigate(r.ips_edit ? `/pharmacy/stock-ips/${r.stock_in_id}` : `/pharmacy/stock-in/${r.stock_in_id}`)} />
       <RowAction icon={Trash2} tone="danger" title={t('common.delete')} onClick={() => remove(r)} />
     </>
   );

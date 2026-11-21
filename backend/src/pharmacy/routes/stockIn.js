@@ -11,6 +11,7 @@ import { isISODate, todayISO } from '../../utils/dates.js';
 import { nextSequence, formatStockInNo } from '../../utils/codes.js';
 import { isAdmin, lockStock, r4 } from '../../utils/stock.js';
 import { selAmount } from '../../../../shared/stockin.js';
+import { clean as cleanOrder } from './purchaseOrder.js';
 
 const router = Router();
 router.use(clinicScope());   // read / write access: pharmacy/index.js
@@ -208,7 +209,8 @@ router.get('/lines', async (req, res) => {
             SUM(a.net_amount) AS net_amount ${from} WHERE ${w}`, params,
   );
   const rows = await query(
-    `SELECT l.id, l.stock_in_id, si.si_no, si.bill_no, si.si_date, s.name AS supplier_name, p.po_no, l.item_name, l.batch_no, l.exp_date,
+    `SELECT l.id, l.stock_in_id, si.si_no, si.bill_no, si.si_date, s.name AS supplier_name,
+            CASE WHEN (SELECT COUNT(*) FROM stock_ins x WHERE x.po_id = si.po_id) = 1 THEN 1 ELSE 0 END AS ips_edit, p.po_no, l.item_name, l.batch_no, l.exp_date,
             x.all_qty AS qty, l.qty AS paid_qty, l.free_qty, l.rate, l.mrp, l.disc_percent, l.sel_amount,
             a.buy_amount, a.sale_amount, a.net_amount, a.sale_amount - a.net_amount AS disc_amount
        ${from} WHERE ${w}
@@ -277,6 +279,73 @@ router.put('/:id', async (req, res) => {
     await q('UPDATE stock_ins SET supplier_id = ?, po_id = ?, si_date = ?, bill_no = COALESCE(?, bill_no), updated_at = NOW() WHERE id = ?',
       [head.supplier_id, head.po_id, head.si_date, head.bill_no ?? null, id]);
     await applyLines(q, req.clinicId, req.user.id, id, head.supplier_id, old, lines, `Stock In ${si.si_no} changed`);
+  });
+  res.json(await loadStockIn(req.clinicId, id));
+});
+
+// PUT /api/pharmacy/stock-ins/:id/ips – Three in One edit: the order and its Stock In saved together, in one go.
+// Same rule as editing a saved Stock In: Admin only, and not once a Return, a Sale or an Adjustment uses its batches.
+// Only for a Stock In that is its order's only one (as Three in One makes them). Stock moves by the change only.
+// { supplier_id, po_date, details, round_off, bill_no,
+//   lines: [{ item_id, mrp, p_rate, disc_percent, qty, free_qty, cgst_percent, sgst_percent, batch_no, mfg_date, exp_date, s_disc }] }
+router.put('/:id/ips', async (req, res) => {
+  if (!isAdmin(req.user)) throw forbidden('Only an Admin can change a saved Stock In');
+  const id = toId(req.params.id);
+  const input = Array.isArray(req.body?.lines) ? req.body.lines : [];
+  if (input.some((l) => !l?.item_id)) throw badRequest('Every line needs an item', 'VALIDATION');
+  const { order, lines: poLines } = await cleanOrder(req.body, req.clinicId);
+  const billNo = String(req.body?.bill_no ?? '').trim().toUpperCase();
+  if (!billNo) throw badRequest('Bill No is required', 'VALIDATION');
+  if (billNo.length > 50) throw badRequest('Bill No must be at most 50 characters', 'VALIDATION');
+
+  // months kept unchanged from the saved Stock In may stay in the past / future, as on the Stock In screen
+  const iso = (d) => (d ? new Date(d).toISOString().slice(0, 7) : null);
+  const saved = await query('SELECT mfg_date, exp_date FROM stock_in_items WHERE stock_in_id = ? AND clinic_id = ?', [id, req.clinicId]);
+  const savedMonths = new Set(saved.flatMap((l) => [iso(l.mfg_date), iso(l.exp_date)]).filter(Boolean));
+  const thisMonth = todayISO().slice(0, 7);
+  const stockLines = poLines.map((l, n) => {
+    const s = input[n];
+    const name = l.item_name;
+    const batch = String(s.batch_no ?? '').trim().toUpperCase().slice(0, 50);
+    if (!batch) throw badRequest(`${name}: Batch No is required`, 'VALIDATION');
+    const mfg = toMonth(s.mfg_date);
+    const exp = toMonth(s.exp_date);
+    if (!exp) throw badRequest(`${name}: Exp.Date is required`, 'VALIDATION');
+    if (mfg && exp <= mfg) throw badRequest(`${name}: Exp.Date must be after Mf.Date`, 'VALIDATION');
+    if (exp < thisMonth && !savedMonths.has(exp)) throw badRequest(`${name}: Exp.Date cannot be in the past`, 'VALIDATION');
+    if (mfg && mfg > thisMonth && !savedMonths.has(mfg)) throw badRequest(`${name}: Mf.Date cannot be in the future`, 'VALIDATION');
+    const disc = toAmount(s.s_disc, 'S.Disc %');
+    if (disc > 100) throw badRequest(`${name}: S.Disc % must be 0–100`, 'VALIDATION');
+    const v = { rate: Number(l.rate), mrp: Number(l.mrp), disc_percent: disc };
+    return {
+      item_id: l.item_id, item_name: name, batch_no: batch, mfg_date: mfg && firstDay(mfg), exp_date: lastDay(exp),
+      qty: Number(l.qty), free_qty: Number(l.free_qty), ...v, sales_percent: 0, sel_amount: selAmount(v),
+    };
+  });
+
+  await tx(async (q) => {
+    await lockStock(q, req.clinicId);
+    const [si] = await q('SELECT si_no, po_id FROM stock_ins WITH (UPDLOCK) WHERE id = ? AND clinic_id = ?', [id, req.clinicId]);
+    if (!si) throw notFound('Stock In');
+    const locked = await lockReason(q, req.clinicId, id);
+    if (locked) throw badRequest(locked, 'VALIDATION');
+    const [other] = await q('SELECT TOP 1 si_no FROM stock_ins WHERE po_id = ? AND id <> ? AND clinic_id = ?', [si.po_id, id, req.clinicId]);
+    if (other) throw badRequest(`Its order is also received by Stock In ${other.si_no} – change it on the Stock In screen`, 'VALIDATION');
+    const old = await q('SELECT item_id, qty, free_qty FROM stock_in_items WHERE stock_in_id = ?', [id]);
+    // the Stock In's lines point at the order's lines: take them off first, then replace the order's lines
+    await q('DELETE FROM stock_in_items WHERE stock_in_id = ? AND clinic_id = ?', [id, req.clinicId]);
+    await q(
+      'UPDATE purchase_orders SET supplier_id = ?, po_date = ?, details = ?, round_off = ?, total_amount = ?, updated_at = NOW() WHERE id = ? AND clinic_id = ?',
+      [order.supplier_id, order.po_date, order.details, order.round_off, order.total_amount, si.po_id, req.clinicId],
+    );
+    await q('DELETE FROM purchase_order_items WHERE po_id = ? AND clinic_id = ?', [si.po_id, req.clinicId]);
+    const lines = [];
+    for (const [n, l] of poLines.entries()) {
+      const poItemId = await insertRow(q, 'purchase_order_items', { clinic_id: req.clinicId, po_id: si.po_id, ...l });
+      lines.push({ po_item_id: poItemId, ...stockLines[n] });
+    }
+    await q('UPDATE stock_ins SET supplier_id = ?, si_date = ?, bill_no = ?, updated_at = NOW() WHERE id = ?', [order.supplier_id, order.po_date, billNo, id]);
+    await applyLines(q, req.clinicId, req.user.id, id, order.supplier_id, old, lines, `Stock In ${si.si_no} changed (Three in One)`);
   });
   res.json(await loadStockIn(req.clinicId, id));
 });
