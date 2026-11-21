@@ -50,7 +50,6 @@ export const PHARMACY_ROUTES = [
   P('/pharmacy/stock-in/:id', 'stock-inward', StockIn),
   P('/pharmacy/stock-in-list', 'stock-inward-list', StockInList),
   P('/pharmacy/stock-ips', 'stock-ips', StockIps),
-  P('/pharmacy/stock-ips/:id', 'stock-ips', StockIps),
   P('/pharmacy/stock-adjustment', 'stock-adjustment', StockAdjustment),
   P('/pharmacy/stock-adjustment/:id', 'stock-adjustment', StockAdjustment),
   P('/pharmacy/stock-adjustment-list', 'stock-adjustment-list', StockAdjustmentList),
