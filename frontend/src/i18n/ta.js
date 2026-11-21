@@ -1040,6 +1040,7 @@ export default {
   'sale.countLabel': "விற்பனைகள்",
   'return.listTitle': "திருப்பி அனுப்பிய பட்டியல்",
   'stockin.listTitle': "சரக்கு வரவு பட்டியல்",
+  'stockin.backToList': "ஸ்டாக் இன் பட்டியலுக்குத் திரும்பு",
   'employees.count': "{n} பணியாளர்கள்",
   'employees.newEmployee': "புதிய பணியாளர்",
   'patients.newPatient': "புதிய நோயாளர்",

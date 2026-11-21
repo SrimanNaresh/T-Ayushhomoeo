@@ -1039,6 +1039,7 @@ export default {
   'sale.countLabel': "Sales",
   'return.listTitle': "Return List",
   'stockin.listTitle': "Stock In List",
+  'stockin.backToList': "Back to Stock In List",
   'employees.count': "{n} employees",
   'employees.newEmployee': "New employee",
   'patients.newPatient': "New patient",

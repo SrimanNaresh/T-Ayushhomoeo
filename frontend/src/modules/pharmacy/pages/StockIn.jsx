@@ -184,7 +184,20 @@ export default function StockInForm({ params }) {
   }
 
   if (id && existing.loading) return <div className="card"><Spinner /></div>;
-  if (existing.error) return <div className="card"><ErrorBox error={existing.error} onRetry={existing.reload} /></div>;
+  // a Stock In that no longer exists (deleted, or an old link): no Retry – back to the list instead
+  if (existing.error) {
+    const gone = existing.error.status === 404;
+    return (
+      <div className="card">
+        <ErrorBox error={existing.error} onRetry={gone ? undefined : existing.reload} />
+        {gone && (
+          <div className="flex justify-end">
+            <button type="button" className="btn-secondary" onClick={() => navigate('/pharmacy/stock-in-list')}>{t('stockin.backToList')}</button>
+          </div>
+        )}
+      </div>
+    );
+  }
   const num = { type: 'number', min: '0', step: '0.01', inputMode: 'decimal' };
   const box = `${GRID_INPUT} text-right`;
   const orderOptions = (orders.data?.rows || []).map((o) => ({
