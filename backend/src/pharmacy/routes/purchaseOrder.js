@@ -7,7 +7,7 @@ import { clinicScope } from '../../middleware/access.js';
 import { badRequest, forbidden, notFound, paging, toAmount, toId, like } from '../../utils/http.js';
 import { isISODate, todayISO } from '../../utils/dates.js';
 import { nextSequence, formatPurchaseNo } from '../../utils/codes.js';
-import { calcLine, roundOffOf } from '../../../../shared/purchase.js';
+import { calcLine, orderNet } from '../../../../shared/purchase.js';
 import { isAdmin } from '../../utils/stock.js';
 
 const router = Router();
@@ -54,10 +54,16 @@ async function clean(body, clinicId) {
     };
   });
   const total = Math.round(lines.reduce((sum, l) => sum + l.total, 0) * 100) / 100;
-  // round_off: true rounds the Sum of Total to the nearest rupee (All In One); total_amount is after it
-  const roundOff = body?.round_off === true ? roundOffOf(total) : 0;
+  // disc_percent: the whole bill's discount (Bill Disc %), off the Sum of Total; round_off: true rounds what is left
+  // to the nearest rupee (All In One). total_amount is the Net Amount, after both (shared/purchase.js orderNet).
+  const discPercent = toAmount(body?.disc_percent, 'Bill Disc %');
+  if (discPercent > 100) throw badRequest('Bill Disc % must be 0–100', 'VALIDATION');
+  const net = orderNet(total, discPercent, body?.round_off === true);
   return {
-    order: { supplier_id: supplierId, po_date: poDate, details, round_off: roundOff, total_amount: Math.round((total + roundOff) * 100) / 100 },
+    order: {
+      supplier_id: supplierId, po_date: poDate, details, disc_percent: discPercent, disc_amount: net.disc_amount,
+      round_off: net.round_off, total_amount: net.net,
+    },
     lines,
   };
 }
@@ -150,8 +156,9 @@ router.put('/:id', async (req, res) => {
     const [received] = await q('SELECT TOP 1 si_no FROM stock_ins WHERE po_id = ? AND clinic_id = ?', [id, req.clinicId]);
     if (received) throw badRequest(`Stock In ${received.si_no} is already made for this order – it can no longer be changed`, 'VALIDATION');
     const r = await q(
-      'UPDATE purchase_orders SET supplier_id = ?, po_date = ?, details = ?, round_off = ?, total_amount = ?, updated_at = NOW() WHERE id = ? AND clinic_id = ?',
-      [order.supplier_id, order.po_date, order.details, order.round_off, order.total_amount, id, req.clinicId],
+      `UPDATE purchase_orders SET supplier_id = ?, po_date = ?, details = ?, disc_percent = ?, disc_amount = ?, round_off = ?, total_amount = ?,
+              updated_at = NOW() WHERE id = ? AND clinic_id = ?`,
+      [order.supplier_id, order.po_date, order.details, order.disc_percent, order.disc_amount, order.round_off, order.total_amount, id, req.clinicId],
     );
     if (!r.affectedRows) throw notFound('Purchase order');
     await saveLines(q, req.clinicId, id, lines);

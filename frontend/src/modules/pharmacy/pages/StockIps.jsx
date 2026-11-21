@@ -22,7 +22,7 @@ import { CardField, ItemCard, CardValue, cardBox, cardBad } from '../../../compo
 import ItemPicker from '../../../components/ItemPicker.jsx';
 import VendorPicker from '../../../components/VendorPicker.jsx';
 import { ColumnsMenu, ResizeHandle, useGridColumns } from '../../../components/GridColumns.jsx';
-import { calcLine, discOf, priced, roundOffOf, splitGst } from '../../../../../shared/purchase.js';
+import { calcLine, discOf, orderNet, priced, splitGst } from '../../../../../shared/purchase.js';
 import { selAmount } from '../../../../../shared/stockin.js';
 import ScanBillModal from './ScanBillModal.jsx';
 import NewVendorBox, { vendorDetails } from './NewVendorBox.jsx';
@@ -129,6 +129,7 @@ export default function StockIps() {
   const [head, setHead] = useState(EMPTY_HEAD);
   const [rows, setRows] = useState([newRow()]);
   const [roundOn, setRoundOn] = useState(true);
+  const [billDisc, setBillDisc] = useState('');     // Bill Disc %: the supplier bill's discount on the whole bill
   const [showDetails, setShowDetails] = useState(false);
   const [newVendor, setNewVendor] = useState(null);
   const [added, setAdded] = useState([]);            // vendors added here, until the list is loaded again
@@ -236,19 +237,22 @@ export default function StockIps() {
   const usedRows = view.filter((v) => v.used);
   const newCount = usedRows.filter((v) => !v.r.item_id).length;
   const sum = r2(usedRows.reduce((s, v) => s + v.calc.total, 0));
-  const roundOff = roundOn ? roundOffOf(sum) : 0;
+  const net = orderNet(sum, billDisc, roundOn);
+  const roundOff = net.round_off;
+  const billDiscBad = Number(billDisc) < 0 || Number(billDisc) > 100;
   const problemText = (p, n) => (p ? `${t('ips.lineN', { n: n + 1 })}: ${t(p[0], p[1])}` : '');
 
   function validate() {
     if (!head.supplier_id) return t('purchase.chooseVendor');
     if (!head.date) return t('common.isRequired', { field: t('purchase.date') });
     if (!head.bill_no.trim()) return t('ips.billNoRequired');
+    if (billDiscBad) return t('ips.billDiscRange');
     if (!usedRows.length) return t('ips.empty');
     const bad = view.findIndex((v) => v.problem);
     return bad >= 0 ? problemText(view[bad].problem, bad) : null;
   }
 
-  const reset = () => { setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); setRoundOn(true); setNewVendor(null); setShowDetails(false); };
+  const reset = () => { setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); setRoundOn(true); setBillDisc(''); setNewVendor(null); setShowDetails(false); };
 
   async function submit(e) {
     e.preventDefault();
@@ -283,7 +287,7 @@ export default function StockIps() {
         order = await api('/pharmacy/purchase-orders', {
           method: 'POST',
           body: {
-            supplier_id: head.supplier_id, po_date: head.date, round_off: roundOn,
+            supplier_id: head.supplier_id, po_date: head.date, round_off: roundOn, disc_percent: Number(billDisc) || 0,
             details: [head.details.trim(), `${t('menu.threeInOne')} · ${t('ips.billNo')}: ${head.bill_no.trim().toUpperCase()}`].filter(Boolean).join('\n'),
             lines: lines.map((r) => ({
               item_id: ids.get(r.key), mrp: r.mrp, p_rate: r.p_rate, disc_percent: r.disc || 0,
@@ -575,11 +579,19 @@ export default function StockIps() {
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4 text-13 text-ink-600">
             <span>{t('purchase.sumTotal')} <b className="tabular-nums text-ink-800">{money(sum)}</b></span>
+            {/* the whole bill's discount, as on the supplier's bill ("Disc% 2"): off the Sum of Total, before Round Off */}
+            <label className="inline-flex items-center gap-1.5" title={t('ips.billDiscHint')}>
+              {t('ips.billDisc')}
+              <input type="number" min="0" max="100" step="0.01" inputMode="decimal" disabled={locked} value={billDisc} placeholder="0"
+                className={`input no-spin !h-8 !w-16 !py-0 text-right ${billDiscBad ? GRID_BAD : ''}`} aria-label={t('ips.billDisc')}
+                onChange={(e) => setBillDisc(e.target.value)} />
+              <span className="tabular-nums text-red-600">{net.disc_amount ? `− ${money(net.disc_amount)}` : ''}</span>
+            </label>
             <label className="inline-flex items-center gap-1.5">
               <input type="checkbox" checked={roundOn} disabled={locked} onChange={(e) => setRoundOn(e.target.checked)} /> {t('sale.roundOff')}
               <span className={`tabular-nums ${roundOff < 0 ? 'text-red-600' : ''}`}>{roundOff > 0 ? '+' : ''}{money(roundOff)}</span>
             </label>
-            <span>{t('ips.netAmount')} <b className="tabular-nums text-brand-800">{money(sum + roundOff)}</b></span>
+            <span>{t('ips.netAmount')} <b className="tabular-nums text-brand-800">{money(net.net)}</b></span>
             {!locked && <button type="button" className="btn-ghost !px-2 !py-1 text-13 max-md:hidden" onClick={() => setRows((rs) => [...rs, newRow()])}><Plus size={15} /> {t('ips.addRow')}</button>}
           </div>
           <div className="flex gap-2">

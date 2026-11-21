@@ -16,16 +16,18 @@ router.use(clinicScope());   // read / write access: pharmacy/index.js
 export const PAY_MODES = ['cash', 'upi', 'bank', 'cheque', 'card'];
 const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 
-// One row per Stock In of the clinic with its Total, Returns and Paid
+// One row per Stock In of the clinic with its Total, Returns and Paid. The order's Bill Disc % comes off both
+// (the supplier's bill discount: what is owed is the bill less it).
 export const INVOICES = `
   SELECT si.id AS stock_in_id, si.si_no, si.bill_no, si.si_date, si.supplier_id, s.name AS supplier_name, po.po_no,
-         COALESCE((SELECT SUM(ROUND(l.qty * l.rate, 2) + ROUND(l.qty * l.rate * COALESCE(p.gst_percent, 0) / 100, 2))
+         po.disc_percent AS bill_disc_percent,
+         ROUND(COALESCE((SELECT SUM(ROUND(l.qty * l.rate, 2) + ROUND(l.qty * l.rate * COALESCE(p.gst_percent, 0) / 100, 2))
                      FROM stock_in_items l LEFT JOIN purchase_order_items p ON p.id = l.po_item_id
-                    WHERE l.stock_in_id = si.id), 0) AS total,
-         COALESCE((SELECT SUM(ri.amount + ROUND(ri.amount * COALESCE(p.gst_percent, 0) / 100, 2))
+                    WHERE l.stock_in_id = si.id), 0) * (100 - COALESCE(po.disc_percent, 0)) / 100, 2) AS total,
+         ROUND(COALESCE((SELECT SUM(ri.amount + ROUND(ri.amount * COALESCE(p.gst_percent, 0) / 100, 2))
                      FROM purchase_returns r JOIN purchase_return_items ri ON ri.return_id = r.id
                      JOIN stock_in_items l ON l.id = ri.stock_in_item_id LEFT JOIN purchase_order_items p ON p.id = l.po_item_id
-                    WHERE r.stock_in_id = si.id), 0) AS returns,
+                    WHERE r.stock_in_id = si.id), 0) * (100 - COALESCE(po.disc_percent, 0)) / 100, 2) AS returns,
          COALESCE((SELECT SUM(vp.amount) FROM vendor_payments vp WHERE vp.stock_in_id = si.id), 0) AS paid
     FROM stock_ins si JOIN suppliers s ON s.id = si.supplier_id JOIN purchase_orders po ON po.id = si.po_id
    WHERE si.clinic_id = ?`;

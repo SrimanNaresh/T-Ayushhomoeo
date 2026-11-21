@@ -938,6 +938,13 @@ GO
 IF COL_LENGTH(N'dbo.purchase_orders', N'round_off') IS NULL
   ALTER TABLE dbo.purchase_orders ADD round_off DECIMAL(10,2) NOT NULL CONSTRAINT df_po_roundoff DEFAULT 0;
 GO
+-- Pharmacy → Purchase / Three in One: the whole bill's discount (Bill Disc %) and its amount, off the Sum of Total
+IF COL_LENGTH(N'dbo.purchase_orders', N'disc_percent') IS NULL
+  ALTER TABLE dbo.purchase_orders ADD disc_percent DECIMAL(5,2) NOT NULL CONSTRAINT df_po_discpct DEFAULT 0;
+GO
+IF COL_LENGTH(N'dbo.purchase_orders', N'disc_amount') IS NULL
+  ALTER TABLE dbo.purchase_orders ADD disc_amount DECIMAL(12,2) NOT NULL CONSTRAINT df_po_discamt DEFAULT 0;
+GO
 -- One row per item on the order. Item details are copied in, so the order keeps them if the item changes later.
 -- rate = mrp - mrp × disc_percent / 100; amount = qty × rate; gst_amount = amount / 100 × (cgst + sgst);
 -- total = amount + gst_amount

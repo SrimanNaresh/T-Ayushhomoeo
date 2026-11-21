@@ -1,7 +1,7 @@
 // Pharmacy formulas shared by the screens and the server: Purchase / Order, Stock In and Sales.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calcLine, discOf, pRateOf, priced, roundOffOf as poRoundOff, splitGst } from '../../shared/purchase.js';
+import { calcLine, discOf, orderNet, pRateOf, priced, roundOffOf as poRoundOff, splitGst } from '../../shared/purchase.js';
 import { packSize, selAmount, unitPrice } from '../../shared/stockin.js';
 import { lineAmount, lineCost, packsOf, perSaleUnit, roundOffOf, saleTotals } from '../../shared/sale.js';
 
@@ -60,4 +60,11 @@ test('Sales: Round Off takes the Total to the nearest rupee', () => {
   assert.equal(saleTotals(line, 0).total_amount, 99.75);                                  // off: unchanged
   const down = saleTotals([{ qty: 1, price: 24.25, sale_unit: 'pack', pack_size: 1, cost: 10 }], 0, { roundOff: true });
   assert.deepEqual([down.round_off, down.total_amount], [-0.25, 24]);
+});
+
+test('Purchase: Bill Disc % comes off the Sum of Total, then Round Off', () => {
+  // the Nagammai bill, page 1: Rate x Qty 1,714.78 + 5 % GST = 1,800.52; Disc 2 % -> 1,764.51 (its Taxable 1,680.49 + GST)
+  assert.deepEqual(orderNet(1800.52, 2, true), { disc_amount: 36.01, after_disc: 1764.51, round_off: 0.49, net: 1765 });
+  assert.deepEqual(orderNet(1800.52, 2, false), { disc_amount: 36.01, after_disc: 1764.51, round_off: 0, net: 1764.51 });
+  assert.deepEqual(orderNet(100, '', true), { disc_amount: 0, after_disc: 100, round_off: 0, net: 100 });
 });

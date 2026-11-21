@@ -41,6 +41,19 @@ export const orderTotal = (lines) => r2(lines.reduce((s, l) => s + calcLine(l).t
 export const roundOffOf = (total) => r2(Math.round(r2(total)) - r2(total));
 
 /**
+ * The whole bill's discount (Bill Disc %, as on a supplier's bill: taken off the goods before GST – the same as
+ * that % of the Sum of Total, GST being a % of the goods), then Round Off:
+ *   Disc Amount = Sum of Total × Disc % / 100;  Net Amount = Sum of Total − Disc Amount (+ Round Off)
+ * e.g. Sum of Total 1,800.52, Disc 2 % → −36.01 = 1,764.51, Round Off +0.49 → Net 1,765.00
+ */
+export function orderNet(sumTotal, discPercent, roundOn = false) {
+  const disc = r2((r2(sumTotal) * num(discPercent)) / 100);
+  const afterDisc = r2(r2(sumTotal) - disc);
+  const round = roundOn ? roundOffOf(afterDisc) : 0;
+  return { disc_amount: disc, after_disc: afterDisc, round_off: round, net: r2(afterDisc + round) };
+}
+
+/**
  * Typing MRP, Disc % or P.Rate on a line: the patch that keeps them in step (as in All In One).
  * MRP or Disc % works out the P.Rate; P.Rate works out the Disc %. Fields: mrp, p_rate and `discKey`.
  */
