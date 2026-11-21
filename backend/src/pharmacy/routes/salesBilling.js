@@ -83,14 +83,16 @@ async function clean(body, clinicId, exceptSale = 0) {
       qty: packs, unit_qty: qty, sale_unit: saleUnit, pack_size: size, price, disc_percent: disc, amount, cost: line.cost,
     });
   }
-  const sums = saleTotals(lines.map((l) => ({ ...l, qty: l.unit_qty })), billDisc);
-  if (sums.total_amount < sums.cost) {
-    throw badRequest(`Total ${money(sums.total_amount)} is below the purchase cost ${money(sums.cost)} – lower the Bill Discount`, 'VALIDATION');
+  // round_off: true rounds the Total to the nearest rupee. The cost check is on the Total before it,
+  // so rounding down by up to 0.50 is allowed (as in Ayush All In One).
+  const sums = saleTotals(lines.map((l) => ({ ...l, qty: l.unit_qty })), billDisc, { roundOff: body?.round_off === true });
+  if (sums.before_round < sums.cost) {
+    throw badRequest(`Total ${money(sums.before_round)} is below the purchase cost ${money(sums.cost)} – lower the Bill Discount`, 'VALIDATION');
   }
   return {
     head: {
       sale_date: date, customer_name: customer, mobile, disc_percent: billDisc,
-      sub_total: sums.sub_total, discount_amount: sums.discount_amount, total_amount: sums.total_amount,
+      sub_total: sums.sub_total, discount_amount: sums.discount_amount, round_off: sums.round_off, total_amount: sums.total_amount,
     },
     lines: lines.map(({ cost, ...l }) => l),
   };
@@ -167,7 +169,7 @@ router.get('/:id', async (req, res) => {
   res.json(await loadSale(req.clinicId, toId(req.params.id)));
 });
 
-// POST /api/pharmacy/sales-billings { sale_date, customer_name, mobile, disc_percent,
+// POST /api/pharmacy/sales-billings { sale_date, customer_name, mobile, disc_percent, round_off (true / false),
 //                   lines: [{ item_id, stock_in_item_id?, sale_unit: 'pack' | 'unit', qty, price, disc_percent }] }
 router.post('/', async (req, res) => {
   const id = await tx(async (q) => {
@@ -194,8 +196,9 @@ router.put('/:id', async (req, res) => {
     const old = await q('SELECT item_id, qty FROM sale_items WHERE sale_id = ?', [id]);
     await q(
       `UPDATE sales SET sale_date = ?, customer_name = ?, mobile = ?, disc_percent = ?, sub_total = ?, discount_amount = ?,
-              total_amount = ?, updated_at = NOW() WHERE id = ?`,
-      [head.sale_date, head.customer_name, head.mobile, head.disc_percent, head.sub_total, head.discount_amount, head.total_amount, id],
+              round_off = ?, total_amount = ?, updated_at = NOW() WHERE id = ?`,
+      [head.sale_date, head.customer_name, head.mobile, head.disc_percent, head.sub_total, head.discount_amount, head.round_off,
+        head.total_amount, id],
     );
     await applyLines(q, req.clinicId, req.user.id, id, sale.sale_no, old, lines);
   });

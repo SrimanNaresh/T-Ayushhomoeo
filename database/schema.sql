@@ -1126,6 +1126,10 @@ GO
 IF COL_LENGTH(N'dbo.sales', N'discount_amount') IS NULL
   ALTER TABLE dbo.sales ADD discount_amount DECIMAL(12,2) NOT NULL CONSTRAINT df_sale_discamt DEFAULT 0;
 GO
+-- Pharmacy → Sales: Round Off (what took the Total to the nearest rupee; total_amount is after it)
+IF COL_LENGTH(N'dbo.sales', N'round_off') IS NULL
+  ALTER TABLE dbo.sales ADD round_off DECIMAL(10,2) NOT NULL CONSTRAINT df_sale_roundoff DEFAULT 0;
+GO
 IF COL_LENGTH(N'dbo.sale_items', N'sale_unit') IS NULL
   ALTER TABLE dbo.sale_items ADD sale_unit NVARCHAR(4) NOT NULL CONSTRAINT df_salei_unit DEFAULT N'pack'
     CONSTRAINT chk_salei_unit CHECK (sale_unit IN (N'pack', N'unit'));

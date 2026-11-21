@@ -58,6 +58,12 @@ export function SaleReceipt({ sale }) {
               <tr><td colSpan={span} className={td}>{t('sale.discountN', { n: qtyText(sale.disc_percent) })}</td><td className={`${td} !text-right`}>− {money(sale.discount_amount)}</td></tr>
             </>
           )}
+          {Number(sale.round_off) !== 0 && (
+            <tr>
+              <td colSpan={span} className={td}>{t('sale.roundOff')}</td>
+              <td className={`${td} !text-right`}>{Number(sale.round_off) > 0 ? '+ ' : '− '}{money(Math.abs(Number(sale.round_off)))}</td>
+            </tr>
+          )}
           <tr className="text-13 font-bold">
             <td colSpan={span} className={`${td} border-t border-black`}>{t('sale.total')}</td>
             <td className={`${td} border-t border-black !text-right`}>{money(sale.total_amount)}</td>

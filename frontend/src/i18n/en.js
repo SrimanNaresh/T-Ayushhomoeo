@@ -780,6 +780,7 @@ export default {
   'sale.unit': "Unit",
   'sale.subTotal': "Sub Total",
   'sale.billDisc': "Bill Discount %",
+  'sale.roundOff': "Round Off",
   'sale.keysHint': "Quick billing: type the item + Enter → Batch → Enter → Sell by → Enter → Quantity → Enter → Disc% → Enter (next row). On Batch and Sell by, ↑ / ↓ change the choice.",
   'sale.totalBelowCost': "Total {total} is below the purchase cost {cost} — lower the Bill Discount",
   'sale.updatePrint': "Update & Print",

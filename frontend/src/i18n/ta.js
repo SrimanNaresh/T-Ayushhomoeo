@@ -781,6 +781,7 @@ export default {
   'sale.unit': "தனி",
   'sale.subTotal': "துணை மொத்தம்",
   'sale.billDisc': "பில் தள்ளுபடி %",
+  'sale.roundOff': "ரவுண்ட் ஆஃப்",
   'sale.keysHint': "விரைவு பில்: பொருள் + Enter → Batch → Enter → விற்கும் முறை → Enter → அளவு → Enter → தள்ளுபடி% → Enter (அடுத்த வரி). Batch, விற்கும் முறையில் ↑ / ↓ தேர்வை மாற்றும்.",
   'sale.totalBelowCost': "மொத்தம் {total} கொள்முதல் அடக்கம் {cost}-க்குக் கீழ் — பில் தள்ளுபடியைக் குறைக்கவும்",
   'sale.updatePrint': "புதுப்பித்து அச்சிடு",

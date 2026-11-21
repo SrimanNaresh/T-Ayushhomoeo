@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { calcLine, splitGst } from '../../shared/purchase.js';
 import { packSize, selAmount, unitPrice } from '../../shared/stockin.js';
-import { lineAmount, lineCost, packsOf, perSaleUnit, saleTotals } from '../../shared/sale.js';
+import { lineAmount, lineCost, packsOf, perSaleUnit, roundOffOf, saleTotals } from '../../shared/sale.js';
 
 test('Purchase line: Rate = P.Rate less Disc %, free units not charged', () => {
   const c = calcLine({ p_rate: 100, disc_percent: 10, qty: 5, free_qty: 1, cgst_percent: 6, sgst_percent: 6 });
@@ -33,5 +33,18 @@ test('Sales: unit sales take a part of a pack; amount less Disc %; bill discount
     { qty: 2, price: 50, disc_percent: 10, sale_unit: 'pack', pack_size: 1, cost: 40 },
     { qty: 1, price: 20, sale_unit: 'pack', pack_size: 1, cost: 15 },
   ], 10);
-  assert.deepEqual(s, { sub_total: 110, discount_amount: 11, total_amount: 99, cost: 95 });
+  assert.deepEqual(s, { sub_total: 110, discount_amount: 11, before_round: 99, round_off: 0, total_amount: 99, cost: 95 });
+});
+
+test('Sales: Round Off takes the Total to the nearest rupee', () => {
+  assert.equal(roundOffOf(24.25), -0.25);
+  assert.equal(roundOffOf(24.5), 0.5);
+  assert.equal(roundOffOf(24.75), 0.25);
+  assert.equal(roundOffOf(24), 0);
+  const line = [{ qty: 3, price: 33.25, sale_unit: 'pack', pack_size: 1, cost: 20 }];   // 99.75
+  assert.deepEqual(saleTotals(line, 0, { roundOff: true }),
+    { sub_total: 99.75, discount_amount: 0, before_round: 99.75, round_off: 0.25, total_amount: 100, cost: 60 });
+  assert.equal(saleTotals(line, 0).total_amount, 99.75);                                  // off: unchanged
+  const down = saleTotals([{ qty: 1, price: 24.25, sale_unit: 'pack', pack_size: 1, cost: 10 }], 0, { roundOff: true });
+  assert.deepEqual([down.round_off, down.total_amount], [-0.25, 24]);
 });

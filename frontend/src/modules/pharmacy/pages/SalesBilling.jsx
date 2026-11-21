@@ -26,7 +26,8 @@ const newLine = () => ({
   key: Math.random().toString(36).slice(2), item_id: null, item_name: '', info: null,
   stock_in_item_id: '', sale_unit: 'pack', price: '', qty: '', disc_percent: '',
 });
-const EMPTY_HEAD = () => ({ sale_date: todayLocal(), customer_name: '', mobile: '', disc_percent: '' });
+// round_off: round the Total to the nearest rupee (on for a new sale; an edit keeps how it was saved)
+const EMPTY_HEAD = () => ({ sale_date: todayLocal(), customer_name: '', mobile: '', disc_percent: '', round_off: true });
 
 /** The line's batch (or null: older stock with no batch) and its prices per pack */
 function packPrices(l) {
@@ -94,7 +95,7 @@ export default function SaleForm({ params }) {
   useEffect(() => {
     const s = existing.data;
     if (!s) return;
-    setHead({ sale_date: String(s.sale_date).slice(0, 10), customer_name: s.customer_name, mobile: s.mobile || '', disc_percent: Number(s.disc_percent) ? String(Number(s.disc_percent)) : '' });
+    setHead({ sale_date: String(s.sale_date).slice(0, 10), customer_name: s.customer_name, mobile: s.mobile || '', disc_percent: Number(s.disc_percent) ? String(Number(s.disc_percent)) : '', round_off: Number(s.round_off) !== 0 });
     const ls = s.lines.map((l) => ({
       ...newLine(), key: String(l.id), item_id: l.item_id, item_name: l.item_name,
       stock_in_item_id: l.stock_in_item_id ? String(l.stock_in_item_id) : '', sale_unit: l.sale_unit || 'pack',
@@ -138,9 +139,15 @@ export default function SaleForm({ params }) {
     return out;
   };
   const problems = new Map(filled.map((l) => [l.key, problemsOf(l)]));
-  const sums = saleTotals(filled.map((l) => views.get(l.key).calc), head.disc_percent);
+  const sums = saleTotals(filled.map((l) => views.get(l.key).calc), head.disc_percent, { roundOff: head.round_off });
+  const roundText = sums.round_off > 0 ? `+ ${money(sums.round_off)}` : sums.round_off < 0 ? `− ${money(-sums.round_off)}` : money(0);
+  const roundBox = (
+    <label className="inline-flex items-center gap-1.5">
+      <input type="checkbox" checked={head.round_off} onChange={(e) => setHead((h) => ({ ...h, round_off: e.target.checked }))} /> {t('sale.roundOff')}
+    </label>
+  );
   const billDiscBad = Number(head.disc_percent) > 100 || Number(head.disc_percent) < 0;
-  const totalBelowCost = filled.length > 0 && sums.total_amount < sums.cost;
+  const totalBelowCost = filled.length > 0 && sums.before_round < sums.cost;   // checked before the Round Off
   const hasProblem = billDiscBad || totalBelowCost || [...problems.values()].some((p) => Object.keys(p).length);
 
   /** Batch / Sell by changed: prices follow, Sale Price goes back to the batch's Sel.Amount */
@@ -334,6 +341,10 @@ export default function SaleForm({ params }) {
                   onChange={(e) => setHead((h) => ({ ...h, disc_percent: e.target.value }))} />
               </label>
             </div>
+            <div className="flex items-center justify-between gap-2 border-t border-ink-100 px-3 py-1.5 text-13 text-ink-600">
+              {roundBox}
+              <b className={`tabular-nums ${sums.round_off < 0 ? 'text-red-600' : 'text-ink-900'}`}>{roundText}</b>
+            </div>
             <div className={`flex items-center justify-between px-3 py-1.5 text-white ${totalBelowCost ? 'bg-red-600' : 'bg-brand-600'}`}>
               <span className="text-13 font-semibold">{t('sale.total')}</span>
               <span className="text-15 font-bold tabular-nums">{money(sums.total_amount)}</span>
@@ -433,6 +444,11 @@ export default function SaleForm({ params }) {
                 <td className={`${cell} ${ro}`}>{sums.discount_amount ? `− ${money(sums.discount_amount)}` : '-'}</td>
                 <td className={cell} />
               </tr>
+              <tr>
+                <td colSpan={12} className={`${cell} px-2 text-right font-normal text-ink-600`}>{roundBox}</td>
+                <td className={`${cell} ${ro} ${sums.round_off < 0 ? 'text-red-600' : 'text-ink-800'}`}>{roundText}</td>
+                <td className={cell} />
+              </tr>
               <tr className="text-14">
                 <td colSpan={12} className={`${cell} bg-brand-600 px-2 text-right font-bold text-white`}>{t('sale.total')}</td>
                 <td className={`${cell} px-1.5 text-right font-bold tabular-nums text-white ${totalBelowCost ? 'bg-red-600' : 'bg-brand-600'}`}>{money(sums.total_amount)}</td>
@@ -442,7 +458,7 @@ export default function SaleForm({ params }) {
           </table>
           <p className="mt-1 text-12 text-ink-400">{t('sale.keysHint')}</p>
         </div>
-        {totalBelowCost && <Note tone="error">{t('sale.totalBelowCost', { total: money(sums.total_amount), cost: money(sums.cost) })}</Note>}
+        {totalBelowCost && <Note tone="error">{t('sale.totalBelowCost', { total: money(sums.before_round), cost: money(sums.cost) })}</Note>}
 
         <div className="no-print mt-3 grid grid-cols-3 gap-2 sm:flex sm:justify-end">
           <button type="button" className="btn-secondary px-2 sm:px-4" onClick={() => (id ? navigate('/pharmacy/sales-billing-list') : reset())}><X size={16} /> {t('common.cancel')}</button>

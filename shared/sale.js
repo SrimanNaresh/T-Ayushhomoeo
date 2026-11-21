@@ -20,9 +20,20 @@ export const lineAmount = ({ qty, price, disc_percent: disc }) => r2(Number(qty 
 export const lineCost = ({ qty, sale_unit: saleUnit, pack_size: packSize, cost }) =>
   r2((Number(qty || 0) * Number(cost || 0)) / unitsPerPack(saleUnit, packSize));
 
-/** Sub Total = Σ Amount; Discount = Bill Discount % of it; TOTAL = Sub Total − Discount; Cost = Σ line cost */
-export function saleTotals(lines, discPercent) {
+/** Round Off: what takes a total to the nearest rupee. 24.25 → −0.25; 24.50 → +0.50; 24.00 → 0 */
+export const roundOffOf = (total) => r2(Math.round(r2(total)) - r2(total));
+
+/**
+ * Sub Total = Σ Amount; Discount = Bill Discount % of it; TOTAL = Sub Total − Discount (+ Round Off when `roundOff`
+ * is on, to the nearest rupee); Cost = Σ line cost. `before_round` is the Total before the Round Off.
+ */
+export function saleTotals(lines, discPercent, { roundOff = false } = {}) {
   const sub = r2(lines.reduce((s, l) => s + lineAmount(l), 0));
   const discount = r2((sub * Number(discPercent || 0)) / 100);
-  return { sub_total: sub, discount_amount: discount, total_amount: r2(sub - discount), cost: r2(lines.reduce((s, l) => s + lineCost(l), 0)) };
+  const beforeRound = r2(sub - discount);
+  const round = roundOff ? roundOffOf(beforeRound) : 0;
+  return {
+    sub_total: sub, discount_amount: discount, before_round: beforeRound, round_off: round,
+    total_amount: r2(beforeRound + round), cost: r2(lines.reduce((s, l) => s + lineCost(l), 0)),
+  };
 }
