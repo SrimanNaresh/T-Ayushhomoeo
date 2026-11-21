@@ -12,6 +12,7 @@ import { money, todayLocal } from '../../../lib/format.js';
 import { CardHeader, ErrorBox, Spinner, GRID_INPUT, GRID_BAD, FORM_ACTIONS, useAsync, useToast } from '../../../components/ui.jsx';
 import { CardField, CardValue, ItemCard, cardBox, cardBad } from '../../../components/MobileCard.jsx';
 import ItemPicker from '../../../components/ItemPicker.jsx';
+import ItemFormModal from './ItemFormModal.jsx';
 import ItemBulkPicker from '../../../components/ItemBulkPicker.jsx';
 import VendorPicker from '../../../components/VendorPicker.jsx';
 import { calcLine, orderTotal, splitGst } from '../../../../../shared/purchase.js';
@@ -113,6 +114,27 @@ export default function PurchaseForm({ params }) {
   const addLineAfter = (key) => setLines((ls) => ls.flatMap((l) => (l.key === key ? [l, newLine()] : [l])));
   const removeLine = (key) => setLines((ls) => (ls.length > 1 ? ls.filter((l) => l.key !== key) : [newLine()]));
   const pickItem = (l) => ({ item, medicine_name: typed }) => setLine(l.key, item ? fromItem(item) : { ...newLine(), key: l.key, item_name: typed });
+
+  // "+ Add new item" / edit (pencil) in an item box open the item popup; `key` is the line it was opened from
+  const [itemForm, setItemForm] = useState(null);   // null | { name, key } (add) | { id, key } (edit)
+  const itemBoxProps = (l) => ({
+    onNew: (typed) => setItemForm({ name: typed, key: l.key }),
+    onEdit: (item) => setItemForm({ id: item.id, key: l.key }),
+  });
+  function itemSaved(item, isNew) {
+    if (isNew) {
+      setLine(itemForm.key, fromItem(item));            // the new item goes on the line it was typed in
+      toast(t('common.savedX', { x: item.name }));
+    } else {
+      // lines already holding the item take its new details; their prices and quantities stay
+      setLines((ls) => ls.map((l) => (l.item_id !== item.id ? l : {
+        ...l, item_name: item.name, generic_name: item.generic_name || '', hsn_code: item.hsn_code || '',
+        manufacturer: item.manufacturer || '', category: item.category || '', pack: item.pack || '', unit: item.unit || '',
+      })));
+      toast(t('common.updatedX', { x: item.name }));
+    }
+    setItemForm(null);
+  }
 
   function validate() {
     if (!head.supplier_id) return t('purchase.chooseVendor');
@@ -251,7 +273,7 @@ export default function PurchaseForm({ params }) {
             );
             return (
               <ItemCard key={l.key} no={n + 1} bad={bad}
-                title={<ItemPicker browse value={l.item_name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(l)} />}
+                title={<ItemPicker browse value={l.item_name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(l)} {...itemBoxProps(l)} />}
                 sub={l.item_id ? [l.category, l.pack, l.unit].filter(Boolean).join(' · ') : ''}>
                 {l.item_id && (
                   <>
@@ -338,7 +360,7 @@ export default function PurchaseForm({ params }) {
                   <tr key={l.key} className="hover:bg-brand-50/30">
                     <td className={`${cell} text-center text-ink-400`}>{n + 1}</td>
                     <td className={cell}>
-                      <ItemPicker browse inputClass={GRID_INPUT} value={l.item_name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(l)} />
+                      <ItemPicker browse inputClass={GRID_INPUT} value={l.item_name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(l)} {...itemBoxProps(l)} />
                     </td>
                     <td className={`${cell} text-12 text-ink-500`}>{l.category || '-'}</td>
                     <td className={`${cell} text-12 text-ink-500`}>{l.pack || '-'}</td>
@@ -405,6 +427,7 @@ export default function PurchaseForm({ params }) {
           <button type="submit" className="btn-primary px-2 sm:px-4" disabled={saving}><Save size={16} /> {saving ? t('common.saving') : t('common.save')}</button>
         </div>
       </form>
+      <ItemFormModal target={itemForm} onClose={() => setItemForm(null)} onSaved={itemSaved} />
     </div>
   );
 }
