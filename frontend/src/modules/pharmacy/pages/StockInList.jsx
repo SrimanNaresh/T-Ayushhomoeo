@@ -89,7 +89,7 @@ export default function StockInList() {
       ? [
         {
           key: 'si_no', label: t('stockin.no'), merged: true, className: merged,
-          render: (r) => <><b className="text-ink-800">{r.si_no}</b><small className="block text-11 text-ink-400">{r.supplier_name} · {r.po_no}</small></>,
+          render: (r) => <><b className="text-ink-800">{r.si_no}</b><small className="block text-11 text-ink-400">{r.supplier_name} · {r.po_no}{r.bill_no ? ` · ${t('stockin.billNo', { no: r.bill_no })}` : ''}</small></>,
         },
         { key: 'item_name', label: t('items.name'), render: (r) => <span className="font-medium text-ink-700">{r.item_name}</span> },
       ]
@@ -97,7 +97,10 @@ export default function StockInList() {
     { key: 'batch_no', label: t('stockin.batch'), render: (r) => r.batch_no || '-' },
     { key: 'exp_date', label: t('stockin.exp'), render: (r) => month(r.exp_date) },
     ...(byDate ? [] : [
-      { key: 'si_no', label: t('stockin.no'), render: (r) => <span title={fmtDate(r.si_date)}>{r.si_no}</span> },
+      {
+        key: 'si_no', label: t('stockin.no'),
+        render: (r) => <span title={fmtDate(r.si_date)}>{r.si_no}{r.bill_no && <small className="block text-11 text-ink-400">{t('stockin.billNo', { no: r.bill_no })}</small>}</span>,
+      },
       { key: 'supplier_name', label: t('purchase.vendor') },
     ]),
     {

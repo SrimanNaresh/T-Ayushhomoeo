@@ -88,6 +88,7 @@ export default function StockIps() {
 
   function validate() {
     if (!head.supplier_id) return t('purchase.chooseVendor');
+    if (!head.bill_no.trim()) return t('ips.billNoRequired');
     if (!filled.length) return t('ips.empty');
     for (const [n, r] of rows.entries()) {
       const p = problems.get(r.key);
@@ -141,7 +142,7 @@ export default function StockIps() {
       const si = await api('/pharmacy/stock-ins', {
         method: 'POST',
         body: {
-          supplier_id: head.supplier_id, po_id: order.id, si_date: head.date,
+          supplier_id: head.supplier_id, po_id: order.id, si_date: head.date, bill_no: head.bill_no.trim().toUpperCase(),
           lines: filled.map((r, n) => ({
             po_item_id: order.lines[n].id, qty: r.qty, free_qty: r.free || 0, batch_no: r.batch.trim(),
             mfg_date: mmyyToMonth(r.mfg), exp_date: mmyyToMonth(r.exp), disc_percent: r.s_disc,
@@ -181,8 +182,8 @@ export default function StockIps() {
             <input className="input" type="date" max={todayLocal()} disabled={locked} value={head.date} onChange={(e) => setHead((h) => ({ ...h, date: e.target.value }))} />
           </div>
           <div>
-            <label className="label">{t('ips.billNo')}</label>
-            <input className="input uppercase" maxLength={40} disabled={locked} value={head.bill_no} placeholder={t('ips.billNoPh')}
+            <label className="label">{t('ips.billNo')} *</label>
+            <input className="input uppercase" maxLength={50} disabled={locked} value={head.bill_no} placeholder={t('ips.billNoPh')}
               onChange={(e) => setHead((h) => ({ ...h, bill_no: e.target.value }))} />
           </div>
         </div>

@@ -104,7 +104,7 @@ export default function VendorPaymentEntry() {
             <select className="input" disabled={!supplierId} value={siId} onChange={(e) => pickInvoice(e.target.value)}>
               <option value="">{!supplierId ? t('stockin.vendorFirst') : invoices.loading ? t('common.loading') : options.length ? '-' : t('vpay.noInvoices')}</option>
               {options.map((r) => (
-                <option key={r.stock_in_id} value={r.stock_in_id}>{`${r.si_no} · ${fmtDate(r.si_date)} · ${t('vpay.balance')} ${money(r.balance)}`}</option>
+                <option key={r.stock_in_id} value={r.stock_in_id}>{`${r.si_no}${r.bill_no ? ` · ${t('stockin.billNo', { no: r.bill_no })}` : ''} · ${fmtDate(r.si_date)} · ${t('vpay.balance')} ${money(r.balance)}`}</option>
               ))}
             </select>
           </div>
@@ -123,7 +123,7 @@ export default function VendorPaymentEntry() {
               ))}
             </dl>
 
-            <p className="section-title mb-1.5 mt-4">{t('vpay.items')} <span className="font-normal text-ink-400">· {d.po_no}</span></p>
+            <p className="section-title mb-1.5 mt-4">{t('vpay.items')} <span className="font-normal text-ink-400">· {d.po_no}{d.bill_no ? ` · ${t('stockin.billNo', { no: d.bill_no })}` : ''}</span></p>
             <div className="overflow-x-auto rounded-lg">
               <table className="list-pinned pin-first w-full min-w-[720px] text-left text-13">
                 <thead>

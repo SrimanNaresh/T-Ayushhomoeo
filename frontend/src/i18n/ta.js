@@ -1146,6 +1146,8 @@ export default {
   'ips.orderKept': "ஆர்டர் {po} சேமிக்கப்பட்டது, இருப்பு வரவு சேமிக்கப்படவில்லை: {err} – திருத்தி மீண்டும் சேமிக்கவும்",
   'ips.billNo': "பில் எண்",
   'ips.billNoPh': "எ.கா. விநியோகஸ்தர் பில் எண்",
+  'ips.billNoRequired': "பில் எண் தேவை",
+  'stockin.billNo': "பில் {no}",
   'ips.lineName': "வரி {n}: பொருள் பெயரை உள்ளிடவும்",
   'ips.lineQty': "வரி {n}: அளவை உள்ளிடவும்",
   'ips.lineMrp': "வரி {n}: MRP ஐ உள்ளிடவும்",

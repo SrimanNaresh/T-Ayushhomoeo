@@ -1145,6 +1145,8 @@ export default {
   'ips.orderKept': "Order {po} is saved but the Stock In is not: {err} – correct it and save again",
   'ips.billNo': "Bill No",
   'ips.billNoPh': "e.g. the vendor's invoice no",
+  'ips.billNoRequired': "Bill No is required",
+  'stockin.billNo': "Bill {no}",
   'ips.lineName': "Line {n}: enter the item name",
   'ips.lineQty': "Line {n}: enter the quantity",
   'ips.lineMrp': "Line {n}: enter the MRP",

@@ -60,6 +60,12 @@ async function clean(body, clinicId, exceptId = 0, saved = new Map()) {
   if (po.supplier_id !== supplierId) throw badRequest('That purchase order is for another vendor', 'VALIDATION');
   const siDate = body?.si_date || todayISO();
   if (!isISODate(siDate)) throw badRequest('Invalid date', 'VALIDATION');
+  // Bill No (the vendor's own invoice number): required when sent (Three in One sends it); the Stock In
+  // screen does not, and an edit from there keeps the saved one.
+  const hasBillNo = body?.bill_no !== undefined;
+  const billNo = String(body?.bill_no ?? '').trim().toUpperCase();
+  if (hasBillNo && !billNo) throw badRequest('Bill No is required', 'VALIDATION');
+  if (billNo.length > 50) throw badRequest('Bill No must be at most 50 characters', 'VALIDATION');
 
   const byLine = new Map((await orderLines(clinicId, poId, exceptId)).map((l) => [l.po_item_id, l]));
   const input = Array.isArray(body?.lines) ? body.lines : [];
@@ -92,7 +98,7 @@ async function clean(body, clinicId, exceptId = 0, saved = new Map()) {
     });
   }
   if (!lines.length) throw badRequest('Enter the quantity received for at least one item', 'VALIDATION');
-  return { head: { supplier_id: supplierId, po_id: poId, si_date: siDate }, lines };
+  return { head: { supplier_id: supplierId, po_id: poId, si_date: siDate, ...(hasBillNo ? { bill_no: billNo } : {}) }, lines };
 }
 
 /**
@@ -159,14 +165,14 @@ router.get('/', async (req, res) => {
     params.push(toId(req.query.supplier_id, 'vendor'));
   }
   if (req.query.q) {
-    where.push('(si.si_no LIKE ? OR p.po_no LIKE ? OR s.name LIKE ?)');
-    params.push(like(req.query.q), like(req.query.q), like(req.query.q));
+    where.push('(si.si_no LIKE ? OR si.bill_no LIKE ? OR p.po_no LIKE ? OR s.name LIKE ?)');
+    params.push(...Array(4).fill(like(req.query.q)));
   }
   const w = where.join(' AND ');
   const from = 'FROM stock_ins si JOIN suppliers s ON s.id = si.supplier_id JOIN purchase_orders p ON p.id = si.po_id';
   const [{ total }] = await query(`SELECT COUNT(*) AS total ${from} WHERE ${w}`, params);
   const rows = await query(
-    `SELECT si.id, si.si_no, si.si_date, s.name AS supplier_name, p.po_no,
+    `SELECT si.id, si.si_no, si.bill_no, si.si_date, s.name AS supplier_name, p.po_no,
             (SELECT COUNT(*) FROM stock_in_items i WHERE i.stock_in_id = si.id) AS item_count,
             (SELECT SUM(i.qty + i.free_qty) FROM stock_in_items i WHERE i.stock_in_id = si.id) AS total_qty
        ${from} WHERE ${w} ORDER BY si.si_date DESC, si.id DESC ${pageSql}`,
@@ -187,8 +193,8 @@ router.get('/lines', async (req, res) => {
   const where = ['si.clinic_id = ?'];
   const params = [req.clinicId];
   if (req.query.q) {
-    where.push('(l.item_name LIKE ? OR l.batch_no LIKE ? OR si.si_no LIKE ? OR s.name LIKE ?)');
-    params.push(...Array(4).fill(like(req.query.q)));
+    where.push('(l.item_name LIKE ? OR l.batch_no LIKE ? OR si.si_no LIKE ? OR si.bill_no LIKE ? OR s.name LIKE ?)');
+    params.push(...Array(5).fill(like(req.query.q)));
   }
   const w = where.join(' AND ');
   const from = `FROM stock_in_items l JOIN stock_ins si ON si.id = l.stock_in_id JOIN suppliers s ON s.id = si.supplier_id
@@ -202,7 +208,7 @@ router.get('/lines', async (req, res) => {
             SUM(a.net_amount) AS net_amount ${from} WHERE ${w}`, params,
   );
   const rows = await query(
-    `SELECT l.id, l.stock_in_id, si.si_no, si.si_date, s.name AS supplier_name, p.po_no, l.item_name, l.batch_no, l.exp_date,
+    `SELECT l.id, l.stock_in_id, si.si_no, si.bill_no, si.si_date, s.name AS supplier_name, p.po_no, l.item_name, l.batch_no, l.exp_date,
             x.all_qty AS qty, l.qty AS paid_qty, l.free_qty, l.rate, l.mrp, l.disc_percent, l.sel_amount,
             a.buy_amount, a.sale_amount, a.net_amount, a.sale_amount - a.net_amount AS disc_amount
        ${from} WHERE ${w}
@@ -241,7 +247,7 @@ router.get('/:id', async (req, res) => {
   res.json(await loadStockIn(req.clinicId, toId(req.params.id)));
 });
 
-// POST /api/pharmacy/stock-ins { supplier_id, po_id, si_date, lines: [{ po_item_id, batch_no, mfg_date, exp_date, qty, free_qty, disc_percent }] }
+// POST /api/pharmacy/stock-ins { supplier_id, po_id, si_date, bill_no?, lines: [{ po_item_id, batch_no, mfg_date, exp_date, qty, free_qty, disc_percent }] }
 router.post('/', async (req, res) => {
   const { head, lines } = await clean(req.body, req.clinicId);
   const id = await tx(async (q) => {
@@ -267,8 +273,9 @@ router.put('/:id', async (req, res) => {
     const locked = await lockReason(q, req.clinicId, id);
     if (locked) throw badRequest(locked, 'VALIDATION');
     const old = await q('SELECT item_id, qty, free_qty FROM stock_in_items WHERE stock_in_id = ?', [id]);
-    await q('UPDATE stock_ins SET supplier_id = ?, po_id = ?, si_date = ?, updated_at = NOW() WHERE id = ?',
-      [head.supplier_id, head.po_id, head.si_date, id]);
+    // bill_no only changes when the screen sent one (Three in One); the Stock In screen keeps the saved one
+    await q('UPDATE stock_ins SET supplier_id = ?, po_id = ?, si_date = ?, bill_no = COALESCE(?, bill_no), updated_at = NOW() WHERE id = ?',
+      [head.supplier_id, head.po_id, head.si_date, head.bill_no ?? null, id]);
     await applyLines(q, req.clinicId, req.user.id, id, head.supplier_id, old, lines, `Stock In ${si.si_no} changed`);
   });
   res.json(await loadStockIn(req.clinicId, id));

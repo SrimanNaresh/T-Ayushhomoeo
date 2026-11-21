@@ -18,7 +18,7 @@ const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 
 // One row per Stock In of the clinic with its Total, Returns and Paid
 export const INVOICES = `
-  SELECT si.id AS stock_in_id, si.si_no, si.si_date, si.supplier_id, s.name AS supplier_name, po.po_no,
+  SELECT si.id AS stock_in_id, si.si_no, si.bill_no, si.si_date, si.supplier_id, s.name AS supplier_name, po.po_no,
          COALESCE((SELECT SUM(ROUND(l.qty * l.rate, 2) + ROUND(l.qty * l.rate * COALESCE(p.gst_percent, 0) / 100, 2))
                      FROM stock_in_items l LEFT JOIN purchase_order_items p ON p.id = l.po_item_id
                     WHERE l.stock_in_id = si.id), 0) AS total,

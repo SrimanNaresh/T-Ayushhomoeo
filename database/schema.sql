@@ -1008,6 +1008,10 @@ GO
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sii_poi' AND object_id = OBJECT_ID(N'dbo.stock_in_items'))
   CREATE INDEX ix_sii_poi ON dbo.stock_in_items(po_item_id);
 GO
+-- Pharmacy → Stock In: the vendor's own bill / invoice number (required on Three in One, optional elsewhere)
+IF COL_LENGTH(N'dbo.stock_ins', N'bill_no') IS NULL
+  ALTER TABLE dbo.stock_ins ADD bill_no NVARCHAR(50) NULL;
+GO
 
 /* ---------- 11. PHARMACY: Return (goods sent back to the vendor, from one Stock In) ----------
    Saving takes each line's quantity out of the item's stock (stock_movements, reason 'return'). */
