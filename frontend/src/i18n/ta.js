@@ -1149,6 +1149,8 @@ export default {
   'ips.groupItem': "பொருள்",
   'ips.groupPurchase': "கொள்முதல்",
   'ips.groupStock': "இருப்பு வரவு",
+  'ips.groupOpen': "இந்தக் குழுவின் மற்ற {n} நெடுவரிசை(களை) காட்டு",
+  'ips.groupClose': "இந்தக் குழுவின் கூடுதல் நெடுவரிசைகளை மறை",
   'ips.packSize': "பேக் அளவு",
   'ips.packSizePh': "எ.கா. 15",
   'ips.addRow': "வரி சேர்",

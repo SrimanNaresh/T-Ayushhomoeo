@@ -10,7 +10,7 @@
 // can't be saved after the order was, the order is kept and Save tries only the Stock In again.
 // Wide screens: the grid (headings and # / Item Name stay in view while it scrolls). Phones: one card per line.
 import { useEffect, useRef, useState } from 'react';
-import { Layers, Save, X, Plus, Trash2, Sparkles, ScanLine, List, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Layers, Save, X, Plus, Trash2, Sparkles, ScanLine, List, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { api } from '../../../lib/api.js';
 import { useT } from '../../../lib/i18n.jsx';
 import { navigate } from '../../../lib/router.jsx';
@@ -108,6 +108,22 @@ function rowProblem(r, firstOf) {
 }
 const lineCalc = (r) => calcLine({ p_rate: r.p_rate, qty: r.qty, ...splitGst(r.gst) });
 
+// The grid's column groups; which are open is remembered in this browser (Item starts closed: an existing item's
+// details come from the Item List)
+const GROUPS = [
+  { id: 'item', label: 'ips.groupItem', tone: 'bg-violet-50 text-violet-700' },
+  { id: 'purchase', label: 'ips.groupPurchase', tone: 'bg-sky-50 text-sky-700' },
+  { id: 'stock', label: 'ips.groupStock', tone: 'bg-emerald-50 text-emerald-700' },
+];
+const OPEN_KEY = 'pharmacy.ips.openGroups';
+const DEFAULT_OPEN = { item: false, purchase: true, stock: true };
+function loadOpen() {
+  try { return { ...DEFAULT_OPEN, ...JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') }; } catch { return DEFAULT_OPEN; }
+}
+function saveOpen(v) {
+  try { localStorage.setItem(OPEN_KEY, JSON.stringify(v)); } catch { /* not kept: fine */ }
+}
+
 const cell = 'border border-ink-200 px-0.5 py-0.5 align-top bg-inherit';
 const hd = 'border border-ink-200 px-0.5 py-1.5 text-center align-middle text-10 xl:text-11';
 const grp = 'border border-ink-200 px-1 py-1 text-center text-11 font-bold uppercase tracking-wide';
@@ -127,6 +143,8 @@ export default function StockIps() {
   const [saving, setSaving] = useState('');            // the step being saved ('' = idle)
   const [savedOrder, setSavedOrder] = useState(null);  // an order saved whose Stock In failed
   const [scanOpen, setScanOpen] = useState(false);
+  const [open, setOpen] = useState(loadOpen);          // column groups open in the grid
+  const toggleGroup = (id) => setOpen((o) => { const next = { ...o, [id]: !o[id] }; saveOpen(next); return next; });
   const vendors = useAsync(() => api('/pharmacy/vendors', { query: { status: 'active' } }), []);
   const vendorRows = [...added.filter((a) => !(vendors.data?.rows || []).some((v) => v.id === a.id)), ...(vendors.data?.rows || [])]
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -324,6 +342,33 @@ export default function StockIps() {
   ) : null);
   const arrow = showDetails ? <ChevronLeft size={15} /> : <ChevronRight size={15} />;
 
+  // The grid's columns: [group, id, heading, width px, cell]. `main` columns stay when their group is closed.
+  const COLUMNS = [
+    { g: 'item', id: 'generic', head: 'items.generic', w: 120, td: ({ r, detail }) => box(r, 'generic', { disabled: detail, label: t('items.generic'), maxLength: 150 }) },
+    { g: 'item', id: 'manufacturer', head: 'items.manufacturer', w: 120, td: ({ r, detail }) => box(r, 'manufacturer', { disabled: detail, label: t('items.manufacturer'), maxLength: 150 }) },
+    { g: 'item', id: 'hsn', head: 'items.hsn', w: 90, td: ({ r, detail }) => box(r, 'hsn', { disabled: detail, label: t('items.hsn'), className: 'uppercase', maxLength: 20 }) },
+    { g: 'item', id: 'category', head: 'items.category', w: 110, td: ({ r, detail }) => box(r, 'category', { disabled: detail, label: t('items.category'), maxLength: 100 }) },
+    { g: 'item', id: 'pack', head: 'items.pack', w: 70, td: ({ r, detail }) => box(r, 'pack', { disabled: detail, label: t('items.pack'), maxLength: 50 }) },
+    { g: 'item', id: 'unit', head: 'purchase.unit', w: 60, td: ({ r, detail }) => box(r, 'unit', { disabled: detail, label: t('purchase.unit'), className: 'text-center', maxLength: 30 }) },
+    { g: 'item', id: 'rack', head: 'items.rack', w: 60, td: ({ r, detail }) => box(r, 'rack', { disabled: detail, label: t('items.rack'), maxLength: 50 }) },
+    { g: 'purchase', id: 'mrp', main: true, head: 'items.mrp', w: 85, td: ({ r, bad }) => priceBox(r, 'mrp', t('items.mrp'), { disabled: locked, className: bad('ips.lineMrp') }) },
+    { g: 'purchase', id: 'old', head: 'purchase.oldPrice', w: 80, ro: true, td: ({ oldPrice }) => (oldPrice == null ? '' : money(oldPrice)) },
+    { g: 'purchase', id: 'disc', main: true, head: 'purchase.disc', w: 65, td: ({ r, bad }) => priceBox(r, 'disc', t('purchase.disc'), { disabled: locked, className: bad('ips.lineDisc') }) },
+    { g: 'purchase', id: 'p_rate', main: true, head: 'purchase.pRate', w: 85, td: ({ r, bad }) => priceBox(r, 'p_rate', t('purchase.pRate'), { disabled: locked, className: `${bad('ips.lineRate')} ${bad('ips.lineOverMrp')}` }) },
+    { g: 'purchase', id: 'qty', main: true, head: 'sale.qty', w: 65, td: ({ r, bad }) => numBox(r, 'qty', t('sale.qty'), { disabled: locked, className: bad('ips.lineQty') }) },
+    { g: 'purchase', id: 'free', head: 'purchase.free', w: 60, td: ({ r }) => numBox(r, 'free', t('purchase.free'), { disabled: locked }) },
+    { g: 'purchase', id: 'amount', head: 'purchase.amount', w: 95, ro: true, td: ({ used, calc }) => (used ? money(calc.amount) : '') },
+    { g: 'purchase', id: 'gst', main: true, head: 'purchase.gst', w: 60, td: ({ r, bad }) => numBox(r, 'gst', t('purchase.gst'), { disabled: locked, className: bad('ips.lineGst') }) },
+    { g: 'purchase', id: 'gstAmt', head: 'purchase.gstAmount', w: 90, ro: true, td: ({ used, calc }) => (used ? money(calc.gst_amount) : '') },
+    { g: 'purchase', id: 'total', main: true, head: 'purchase.total', w: 100, ro: true, className: 'font-semibold text-ink-800', td: ({ used, calc }) => (used ? money(calc.total) : '') },
+    { g: 'stock', id: 'batch', main: true, head: 'stockin.batch', w: 110, td: ({ r, bad }) => box(r, 'batch', { label: t('stockin.batch'), className: `uppercase ${bad('ips.lineBatch')}`, maxLength: 50 }) },
+    { g: 'stock', id: 'mfg', head: 'stockin.mfg', w: 75, td: ({ r }) => monthBox(r, 'mfg', t('stockin.mfg')) },
+    { g: 'stock', id: 'exp', main: true, head: 'stockin.exp', w: 75, td: ({ r }) => monthBox(r, 'exp', t('stockin.exp')) },
+    { g: 'stock', id: 's_disc', head: 'stockin.sDisc', w: 65, td: ({ r, bad }) => numBox(r, 's_disc', t('stockin.sDisc'), { className: bad('ips.lineSDisc') }) },
+    { g: 'stock', id: 'sel', head: 'stockin.sel', w: 85, ro: true, td: ({ r }) => (num(r.mrp) ? selAmount({ mrp: r.mrp, disc_percent: r.s_disc }).toFixed(2) : '') },
+  ];
+  const shown = COLUMNS.filter((c) => open[c.g] || c.main);
+
   return (
     <div className="card max-md:!px-3">
       <form onSubmit={submit} noValidate>
@@ -429,67 +474,67 @@ export default function StockIps() {
           {!locked && <button type="button" className="btn-secondary w-full" onClick={() => setRows((rs) => [...rs, newRow()])}><Plus size={16} /> {t('ips.addRow')}</button>}
         </div>
 
-        {/* Wide screens: the grid, columns grouped as on the Item, Purchase / Order and Stock In screens; it scrolls in
-            its own box with the headings on top and # / Item Name on the left */}
+        {/* Wide screens: the grid, columns grouped as on the Item, Purchase / Order and Stock In screens; each group opens /
+            closes with the arrow in its heading (closed: only its main columns). It scrolls in its own box with the
+            headings on top and # / Item Name on the left. */}
         <div className="mt-3 hidden max-h-[65vh] overflow-auto rounded-lg border border-ink-200 md:block">
-          <table className="w-full min-w-[1700px] border-separate border-spacing-0 text-left text-12">
+          <table className="w-full border-separate border-spacing-0 text-left text-12" style={{ minWidth: 300 + shown.reduce((s2, c) => s2 + c.w, 0) }}>
             <thead className="sticky top-0 z-20">
               <tr>
                 <th className={`${grp} ${freeze0} z-30 bg-ink-50 text-ink-500`} rowSpan={2}>#</th>
                 <th className={`${grp} ${freeze1} z-30 bg-violet-50 !text-left text-violet-700`} rowSpan={2}>{t('items.name')}</th>
-                <th colSpan={7} className={`${grp} bg-violet-50 text-violet-700`}>{t('ips.groupItem')}</th>
-                <th colSpan={10} className={`${grp} bg-sky-50 text-sky-700`}>{t('ips.groupPurchase')}</th>
-                <th colSpan={5} className={`${grp} bg-emerald-50 text-emerald-700`}>{t('ips.groupStock')}</th>
+                {GROUPS.map((g) => {
+                  const isOpen = open[g.id];
+                  const cols = shown.filter((c) => c.g === g.id);
+                  const hidden = COLUMNS.filter((c) => c.g === g.id).length - cols.length;
+                  return (
+                    <th key={g.id} colSpan={Math.max(cols.length, 1)} className={`${grp} ${g.tone} !p-0`}>
+                      <button type="button" className="flex w-full items-center justify-center gap-1.5 px-1 py-1 hover:brightness-95" aria-expanded={isOpen}
+                        title={isOpen ? t('ips.groupClose') : t('ips.groupOpen', { n: hidden })} onClick={() => toggleGroup(g.id)}>
+                        {isOpen ? <ChevronsLeft size={14} /> : <ChevronsRight size={14} />}
+                        {t(g.label)}
+                        {!isOpen && hidden > 0 && <span className="rounded-full bg-white/70 px-1.5 text-10 normal-case tracking-normal">+{hidden}</span>}
+                      </button>
+                    </th>
+                  );
+                })}
                 <th className={`${grp} bg-ink-50`} rowSpan={2} />
               </tr>
               <tr className="font-bold">
-                {[['items.generic', 'w-28'], ['items.manufacturer', 'w-28'], ['items.hsn', 'w-20'], ['items.category', 'w-24'], ['items.pack', 'w-16'], ['purchase.unit', 'w-14'], ['items.rack', 'w-14']]
-                  .map(([k, w]) => <th key={k} className={`${hd} ${w} bg-violet-50 text-violet-700`}>{t(k)}</th>)}
-                {[['items.mrp', 'w-[4.5rem]'], ['purchase.oldPrice', 'w-[4.5rem]'], ['purchase.disc', 'w-14'], ['purchase.pRate', 'w-[4.5rem]'], ['sale.qty', 'w-14'], ['purchase.free', 'w-14'],
-                  ['purchase.amount', 'w-20'], ['purchase.gst', 'w-14'], ['purchase.gstAmount', 'w-[4.5rem]'], ['purchase.total', 'w-20']]
-                  .map(([k, w]) => <th key={k} className={`${hd} ${w} bg-sky-50 text-sky-700`}>{t(k)}</th>)}
-                {[['stockin.batch', 'w-24'], ['stockin.mfg', 'w-[4.5rem]'], ['stockin.exp', 'w-[4.5rem]'], ['stockin.sDisc', 'w-14'], ['stockin.sel', 'w-[4.5rem]']]
-                  .map(([k, w]) => <th key={k} className={`${hd} ${w} bg-emerald-50 text-emerald-700`}>{t(k)}</th>)}
+                {GROUPS.map((g) => {
+                  const cols = shown.filter((c) => c.g === g.id);
+                  if (!cols.length) {
+                    return <th key={g.id} className={`${hd} w-8 ${g.tone}`} title={t('ips.groupOpen', { n: COLUMNS.filter((c) => c.g === g.id).length })}>…</th>;
+                  }
+                  return cols.map((c) => <th key={c.id} className={`${hd} ${g.tone}`} style={{ width: c.w }}>{t(c.head)}</th>);
+                })}
               </tr>
             </thead>
             <tbody onKeyDown={arrowMove}>
-              {view.map(({ r, used, problem, calc }, n) => {
-                const detail = !!r.item_id || locked;   // an existing item's details come from the Item List
+              {view.map((v, n) => {
+                const { r, used, problem } = v;
                 const bg = problem ? 'bg-red-50' : 'bg-white';
-                const bad = (key) => (problem?.[0] === key ? GRID_BAD : '');
-                const oldPrice = r.item_id && head.supplier_id ? Number(oldPrices.data?.[r.item_id] || 0) : null;
+                const ctx = {
+                  ...v,
+                  detail: !!r.item_id || locked,   // an existing item's details come from the Item List
+                  bad: (key) => (problem?.[0] === key ? GRID_BAD : ''),
+                  oldPrice: r.item_id && head.supplier_id ? Number(oldPrices.data?.[r.item_id] || 0) : null,
+                };
                 return (
                   <tr key={r.key} className={bg} title={problem ? problemText(problem, n) : undefined}>
                     <td className={`${cell} ${freeze0} ${bg} text-center text-ink-400`}>{n + 1}</td>
                     <td className={`${cell} ${freeze1} ${bg}`}>
                       {locked ? <span className="block px-1.5 py-1">{r.name}</span> : (
-                        <ItemPicker inputClass={`${GRID_INPUT} ${bad('ips.lineName')} ${bad('ips.lineRepeat')}`} value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />
+                        <ItemPicker inputClass={`${GRID_INPUT} ${ctx.bad('ips.lineName')} ${ctx.bad('ips.lineRepeat')}`} value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />
                       )}
                       {status(r, used)}
                       {problem && <span className="block px-1.5 text-10 text-red-600">{problemText(problem, n)}</span>}
                     </td>
-                    <td className={cell}>{box(r, 'generic', { disabled: detail, label: t('items.generic'), maxLength: 150 })}</td>
-                    <td className={cell}>{box(r, 'manufacturer', { disabled: detail, label: t('items.manufacturer'), maxLength: 150 })}</td>
-                    <td className={cell}>{box(r, 'hsn', { disabled: detail, label: t('items.hsn'), className: 'uppercase', maxLength: 20 })}</td>
-                    <td className={cell}>{box(r, 'category', { disabled: detail, label: t('items.category'), maxLength: 100 })}</td>
-                    <td className={cell}>{box(r, 'pack', { disabled: detail, label: t('items.pack'), maxLength: 50 })}</td>
-                    <td className={cell}>{box(r, 'unit', { disabled: detail, label: t('purchase.unit'), className: 'text-center', maxLength: 30 })}</td>
-                    <td className={cell}>{box(r, 'rack', { disabled: detail, label: t('items.rack'), maxLength: 50 })}</td>
-                    <td className={cell}>{priceBox(r, 'mrp', t('items.mrp'), { disabled: locked, className: bad('ips.lineMrp') })}</td>
-                    <td className={`${cell} ${ro}`}>{oldPrice == null ? '' : money(oldPrice)}</td>
-                    <td className={cell}>{priceBox(r, 'disc', t('purchase.disc'), { disabled: locked, className: bad('ips.lineDisc') })}</td>
-                    <td className={cell}>{priceBox(r, 'p_rate', t('purchase.pRate'), { disabled: locked, className: `${bad('ips.lineRate')} ${bad('ips.lineOverMrp')}` })}</td>
-                    <td className={cell}>{numBox(r, 'qty', t('sale.qty'), { disabled: locked, className: bad('ips.lineQty') })}</td>
-                    <td className={cell}>{numBox(r, 'free', t('purchase.free'), { disabled: locked })}</td>
-                    <td className={`${cell} ${ro}`}>{used ? money(calc.amount) : ''}</td>
-                    <td className={cell}>{numBox(r, 'gst', t('purchase.gst'), { disabled: locked, className: bad('ips.lineGst') })}</td>
-                    <td className={`${cell} ${ro}`}>{used ? money(calc.gst_amount) : ''}</td>
-                    <td className={`${cell} ${ro} font-semibold text-ink-800`}>{used ? money(calc.total) : ''}</td>
-                    <td className={cell}>{box(r, 'batch', { label: t('stockin.batch'), className: `uppercase ${bad('ips.lineBatch')}`, maxLength: 50 })}</td>
-                    <td className={cell}>{monthBox(r, 'mfg', t('stockin.mfg'))}</td>
-                    <td className={cell}>{monthBox(r, 'exp', t('stockin.exp'))}</td>
-                    <td className={cell}>{numBox(r, 's_disc', t('stockin.sDisc'), { className: bad('ips.lineSDisc') })}</td>
-                    <td className={`${cell} ${ro}`}>{num(r.mrp) ? selAmount({ mrp: r.mrp, disc_percent: r.s_disc }).toFixed(2) : ''}</td>
+                    {GROUPS.map((g) => {
+                      const cols = shown.filter((c) => c.g === g.id);
+                      if (!cols.length) return <td key={g.id} className={`${cell} text-center text-ink-300`}>…</td>;
+                      return cols.map((c) => <td key={c.id} className={`${cell} ${c.ro ? ro : ''} ${c.className || ''}`}>{c.td(ctx)}</td>);
+                    })}
                     <td className={`${cell} whitespace-nowrap text-center`}>
                       {!locked && (
                         <>

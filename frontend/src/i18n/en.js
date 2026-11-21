@@ -1148,6 +1148,8 @@ export default {
   'ips.groupItem': "Item",
   'ips.groupPurchase': "Purchase",
   'ips.groupStock': "Stock In",
+  'ips.groupOpen': "Show this group's other {n} column(s)",
+  'ips.groupClose': "Hide this group's extra columns",
   'ips.packSize': "Pack size",
   'ips.packSizePh': "e.g. 15",
   'ips.addRow': "Add row",
