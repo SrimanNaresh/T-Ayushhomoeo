@@ -5,7 +5,7 @@ import { api } from '../../../lib/api.js';
 import { useT } from '../../../lib/i18n.jsx';
 import { navigate } from '../../../lib/router.jsx';
 import { isDigits, isEmail, isGstin, isPincode } from '../../../lib/validators.js';
-import { CardHeader, ErrorBox, Spinner, GRID_WIDE, GRID_SHORT, FORM_ACTIONS, useAsync, useForm, useToast } from '../../../components/ui.jsx';
+import { CardHeader, ErrorBox, Spinner, GRID_SHORT, FORM_ACTIONS, useAsync, useForm, useToast } from '../../../components/ui.jsx';
 
 // Indian states and union territories, for the State drop-down
 const STATES = [
@@ -43,13 +43,13 @@ export default function VendorForm({ params }) {
   // Same checks the server runs; the first problem or null.
   function validate() {
     if (!v.name.trim()) return t('common.isRequired', { field: t('suppliers.name') });
-    if (!v.address.trim()) return t('common.isRequired', { field: t('field.address') });
     if (!v.mobile.trim()) return t('common.isRequired', { field: t('suppliers.mobile') });
     if (!isDigits(v.mobile)) return t('common.digitsOnly', { field: t('suppliers.mobile') });
     if (!isDigits(v.phone)) return t('common.digitsOnly', { field: t('suppliers.phone') });
     if (!isPincode(v.pincode)) return t('common.nDigits', { field: t('suppliers.pincode'), n: 6 });
     if (!isGstin(v.gstin)) return t('suppliers.gstinLen');
     if (!isEmail(v.email)) return t('common.badEmail');
+    if (!v.address.trim()) return t('common.isRequired', { field: t('field.address') });   // last, as it is on screen
     return null;
   }
 
@@ -89,26 +89,20 @@ export default function VendorForm({ params }) {
             title={id ? t('suppliers.editTitle') : t('suppliers.masterTitle')}
             subtitle={id ? t('suppliers.editSubtitle') : t('suppliers.masterSubtitle')} />
 
-          <div className={GRID_WIDE}>
-            <div>
+          {/* One grid as in Ayush All In One: 7 to a row on desktop, Address last and wide */}
+          <div className={GRID_SHORT}>
+            <div className="col-span-2 sm:col-span-1">
               <label className="label">{t('suppliers.name')} *</label>
               <input className="input" autoFocus maxLength={150} placeholder="e.g. Sri Murugan Medicals" {...f.bind('name')} />
             </div>
-            <div>
+            <div className="col-span-2 sm:col-span-1">
               <label className="label">{t('suppliers.contact')}</label>
               <input className="input" maxLength={150} placeholder="Person to contact" {...f.bind('contact_person')} />
             </div>
-            <div>
-              <label className="label">{t('field.address')} *</label>
-              <textarea className="input" rows={2} maxLength={500} placeholder="Vendor address" {...f.bind('address')} />
-            </div>
-            <div>
+            <div className="col-span-2 sm:col-span-1">
               <label className="label">{t('field.email')}</label>
               <input type="email" className="input" maxLength={150} placeholder="e.g. orders@vendor.com" {...f.bind('email')} />
             </div>
-          </div>
-
-          <div className={`mt-3 ${GRID_SHORT}`}>
             <div className="col-span-2 sm:col-span-1">
               <label className="label">{t('suppliers.state')}</label>
               <select className="input" {...f.bind('state')}>
@@ -140,15 +134,16 @@ export default function VendorForm({ params }) {
               <label className="label">{t('suppliers.dl2')}</label>
               <input className="input" maxLength={50} placeholder="Drug licence 2" {...upper('dl_no2')} />
             </div>
-          </div>
-
-          <div className={`mt-3 ${GRID_SHORT}`}>
             <div>
               <label className="label">{t('field.status')}</label>
               <select className="input" {...f.bind('status')}>
                 <option value="active">{t('status.active')}</option>
                 <option value="inactive">{t('status.inactive')}</option>
               </select>
+            </div>
+            <div className="col-span-2 sm:col-span-4 lg:col-span-3">
+              <label className="label">{t('field.address')} *</label>
+              <textarea className="input" rows={2} maxLength={500} placeholder="Vendor address" {...f.bind('address')} />
             </div>
           </div>
 

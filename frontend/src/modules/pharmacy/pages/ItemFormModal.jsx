@@ -61,7 +61,7 @@ export default function ItemFormModal({ target, onClose, onSaved }) {
       {loading ? <Spinner /> : (
         // keys typed in the popup must not reach the page's grid keyboard handling
         <form onSubmit={save} onKeyDown={(e) => e.stopPropagation()} noValidate>
-          <ItemFields f={f} />
+          <ItemFields f={f} narrow />
           {error && <p className="mt-2 text-13 text-red-600">{error}</p>}
           <div className="mt-4 flex justify-end gap-2">
             <button type="button" className="btn-secondary" onClick={onClose}><X size={16} /> {t('common.cancel')}</button>

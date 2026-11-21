@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { api } from '../../../lib/api.js';
 import { useT } from '../../../lib/i18n.jsx';
-import { Field, GRID_WIDE, GRID_SHORT, useAsync } from '../../../components/ui.jsx';
+import { Field, useAsync } from '../../../components/ui.jsx';
 import RxListPicker from '../../../components/RxListPicker.jsx';
 
 // Only these fields are on the form; anything else on an existing item (supplier, purchase rate, …)
@@ -49,8 +49,10 @@ function useItemList(kind) {
 
 /**
  * The fields. `f` is useForm(ITEM_EMPTY); `qty` / `setQty` the Quantity box (left out when `setQty` is not given).
+ * As in Ayush All In One: every box the same width in one grid – 8 to a row on the Item Master page (two rows),
+ * 5 to a row in the popup (`narrow`).
  */
-export function ItemFields({ f, qty, setQty, autoFocus = true }) {
+export function ItemFields({ f, qty, setQty, autoFocus = true, narrow = false }) {
   const { t } = useT();
   const v = f.values;
   const [genericList, setGenericList] = useItemList('generic');
@@ -64,81 +66,44 @@ export function ItemFields({ f, qty, setQty, autoFocus = true }) {
       <RxListPicker kind={kind} label={label} value={v[field]} list={list} onChange={(x) => f.set(field, x)} onListChange={setList} />
     </Field>
   );
+  const box = (label, input, className = '') => (
+    <div className={`min-w-0 ${className}`}>
+      <label className="label">{label}</label>
+      {input}
+    </div>
+  );
 
   return (
-    <>
-      <div className={GRID_WIDE}>
-        <div>
-          <label className="label">{t('items.name')} *</label>
-          <input className="input" autoFocus={autoFocus} placeholder={t('items.namePh')} {...f.bind('name')} />
-        </div>
-        {picker('generic', 'generic_name', genericList, setGenericList, t('items.generic'))}
-        {picker('manufacturer', 'manufacturer', mfrList, setMfrList, t('items.manufacturer'))}
-        {picker('unit', 'unit', unitList, setUnitList, t('items.typeUnit'))}
-      </div>
-
-      <div className={`mt-3 ${GRID_SHORT}`}>
-        <div>
-          <label className="label">{t('items.pack')}</label>
-          <input className="input" placeholder={t('items.packPh')} {...f.bind('pack')} />
-        </div>
-        <div>
-          <label className="label">{t('items.hsn')}</label>
-          <input className="input" maxLength={20} placeholder={t('items.hsnPh')} {...f.bind('hsn_code')} />
-        </div>
-        {setQty && (
-          <div>
-            <label className="label">{t('items.quantity')}</label>
-            <input {...moneyBox} step="0.01" placeholder="0" value={qty} onChange={(e) => setQty(e.target.value)} />
-          </div>
-        )}
-        <div>
-          <label className="label">{t('items.mrp')}</label>
-          <input {...moneyBox} {...f.bind('mrp')} />
-        </div>
-        <div>
-          <label className="label">{t('items.cgst')}</label>
-          <input {...moneyBox} max="14" placeholder="0 – 14" {...f.bind('cgst_percent')} />
-        </div>
-        <div>
-          <label className="label">{t('items.sgst')}</label>
-          <input {...moneyBox} max="14" placeholder="0 – 14" {...f.bind('sgst_percent')} />
-        </div>
-        <div className="col-span-2 grid grid-cols-2 gap-3 sm:col-span-2 lg:col-span-1">
-          <div>
-            <label className="label">{t('items.rack')}</label>
-            <input className="input" placeholder={t('items.rackPh')} {...f.bind('rack')} />
-          </div>
-          <div>
-            <label className="label">{t('items.box')}</label>
-            <input className="input" placeholder={t('items.boxPh')} {...f.bind('box')} />
-          </div>
-        </div>
-      </div>
-
-      <div className={`mt-3 ${GRID_WIDE}`}>
-        {picker('category', 'category', categoryList, setCategoryList, t('items.category'))}
-        {picker('itempotency', 'potency', potencyList, setPotencyList, t('items.potency'))}
-        <div className="grid grid-cols-2 gap-3">
-          {/* one Schedule choice, stored as the two schedule_h / schedule_h1 flags */}
-          <div>
-            <label className="label">{t('items.schedule')}</label>
-            <select className="input" value={v.schedule_h1 ? 'H1' : v.schedule_h ? 'H' : ''}
-              onChange={(e) => f.setValues({ ...v, schedule_h: e.target.value === 'H', schedule_h1: e.target.value === 'H1' })}>
-              <option value="">{t('items.scheduleNone')}</option>
-              <option value="H">H</option>
-              <option value="H1">H1</option>
-            </select>
-          </div>
-          <div>
-            <label className="label">{t('field.status')}</label>
-            <select className="input" {...f.bind('status')}>
-              <option value="active">{t('status.active')}</option>
-              <option value="inactive">{t('status.inactive')}</option>
-            </select>
-          </div>
-        </div>
-      </div>
-    </>
+    <div className={`grid grid-cols-2 gap-3 sm:grid-cols-4 ${narrow ? 'lg:grid-cols-5' : 'lg:grid-cols-8'}`}>
+      {box(`${t('items.name')} *`, <input className="input" autoFocus={autoFocus} placeholder={t('items.namePh')} {...f.bind('name')} />, 'col-span-2 sm:col-span-1')}
+      {picker('generic', 'generic_name', genericList, setGenericList, t('items.generic'))}
+      {picker('manufacturer', 'manufacturer', mfrList, setMfrList, t('items.manufacturer'))}
+      {picker('unit', 'unit', unitList, setUnitList, t('items.typeUnit'))}
+      {box(t('items.pack'), <input className="input" placeholder={t('items.packPh')} {...f.bind('pack')} />)}
+      {box(t('items.hsn'), <input className="input" maxLength={20} placeholder={t('items.hsnPh')} {...f.bind('hsn_code')} />)}
+      {setQty && box(t('items.quantity'), <input {...moneyBox} step="0.01" placeholder="0" value={qty} onChange={(e) => setQty(e.target.value)} />)}
+      {box(t('items.mrp'), <input {...moneyBox} {...f.bind('mrp')} />)}
+      {box(t('items.cgst'), <input {...moneyBox} max="14" placeholder="0 – 14" {...f.bind('cgst_percent')} />)}
+      {box(t('items.sgst'), <input {...moneyBox} max="14" placeholder="0 – 14" {...f.bind('sgst_percent')} />)}
+      {box(t('items.rack'), <input className="input" placeholder={t('items.rackPh')} {...f.bind('rack')} />)}
+      {box(t('items.box'), <input className="input" placeholder={t('items.boxPh')} {...f.bind('box')} />)}
+      {picker('category', 'category', categoryList, setCategoryList, t('items.category'))}
+      {picker('itempotency', 'potency', potencyList, setPotencyList, t('items.potency'))}
+      {/* one Schedule choice, stored as the two schedule_h / schedule_h1 flags */}
+      {box(t('items.schedule'), (
+        <select className="input" value={v.schedule_h1 ? 'H1' : v.schedule_h ? 'H' : ''}
+          onChange={(e) => f.setValues({ ...v, schedule_h: e.target.value === 'H', schedule_h1: e.target.value === 'H1' })}>
+          <option value="">{t('items.scheduleNone')}</option>
+          <option value="H">H</option>
+          <option value="H1">H1</option>
+        </select>
+      ))}
+      {box(t('field.status'), (
+        <select className="input" {...f.bind('status')}>
+          <option value="active">{t('status.active')}</option>
+          <option value="inactive">{t('status.inactive')}</option>
+        </select>
+      ))}
+    </div>
   );
 }
