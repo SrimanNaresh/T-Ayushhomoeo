@@ -32,7 +32,7 @@ moves). `stock_ins` had 0 rows, so no saved data was touched. `npm run db:init` 
 ## Remaining phases (corrected after a closer comparison)
 This app already has CGST / SGST, vendor State, the Excel item import template, pack-size logic and
 IPS-style draft handling of a saved order. Still to port from All In One:
-2. FIFO stock events (stock worked out from transactions).
+2. FIFO stock events (stock worked out from transactions) — already covered here, see `02_pharmacy_phase2_stock.md`.
 3. Sales: Round Off, A4 + thermal receipt print (`SalesBillReceipt`).
 4. Items: add a new item from inside the grids (`ItemFormModal`).
 5. Scan Bill on Stock In / Three in One (`tesseract.js`, `pdfjs-dist`).
