@@ -21,6 +21,7 @@ import { CardHeader, Note, GRID_INPUT, GRID_BAD, RowAction, useAsync, useToast }
 import { CardField, ItemCard, CardValue, cardBox, cardBad } from '../../../components/MobileCard.jsx';
 import ItemPicker from '../../../components/ItemPicker.jsx';
 import VendorPicker from '../../../components/VendorPicker.jsx';
+import { ColumnsMenu, ResizeHandle, useGridColumns } from '../../../components/GridColumns.jsx';
 import { calcLine, discOf, priced, roundOffOf, splitGst } from '../../../../../shared/purchase.js';
 import { selAmount } from '../../../../../shared/stockin.js';
 import ScanBillModal from './ScanBillModal.jsx';
@@ -108,28 +109,19 @@ function rowProblem(r, firstOf) {
 }
 const lineCalc = (r) => calcLine({ p_rate: r.p_rate, qty: r.qty, ...splitGst(r.gst) });
 
-// The grid's column groups; which are open is remembered in this browser (Item starts closed: an existing item's
-// details come from the Item List)
+// The grid's column groups. Which columns show and how wide they are is remembered in this browser (components/
+// GridColumns.jsx); the Item group's columns start hidden (an existing item's details come from the Item List).
 const GROUPS = [
   { id: 'item', label: 'ips.groupItem', tone: 'bg-violet-50 text-violet-700' },
   { id: 'purchase', label: 'ips.groupPurchase', tone: 'bg-sky-50 text-sky-700' },
   { id: 'stock', label: 'ips.groupStock', tone: 'bg-emerald-50 text-emerald-700' },
 ];
-const OPEN_KEY = 'pharmacy.ips.openGroups';
-const DEFAULT_OPEN = { item: false, purchase: true, stock: true };
-function loadOpen() {
-  try { return { ...DEFAULT_OPEN, ...JSON.parse(localStorage.getItem(OPEN_KEY) || '{}') }; } catch { return DEFAULT_OPEN; }
-}
-function saveOpen(v) {
-  try { localStorage.setItem(OPEN_KEY, JSON.stringify(v)); } catch { /* not kept: fine */ }
-}
-
 const cell = 'border border-ink-200 px-0.5 py-0.5 align-top bg-inherit';
 const hd = 'border border-ink-200 px-0.5 py-1.5 text-center align-middle text-10 xl:text-11';
 const grp = 'border border-ink-200 px-1 py-1 text-center text-11 font-bold uppercase tracking-wide';
 const ro = 'px-1 text-right tabular-nums text-ink-600';
 const freeze0 = 'sticky left-0 z-10 w-8 min-w-[2rem]';
-const freeze1 = 'sticky left-8 z-10 min-w-[220px]';
+const freeze1 = 'sticky left-8 z-10';
 
 export default function StockIps() {
   const { t } = useT();
@@ -143,8 +135,6 @@ export default function StockIps() {
   const [saving, setSaving] = useState('');            // the step being saved ('' = idle)
   const [savedOrder, setSavedOrder] = useState(null);  // an order saved whose Stock In failed
   const [scanOpen, setScanOpen] = useState(false);
-  const [open, setOpen] = useState(loadOpen);          // column groups open in the grid
-  const toggleGroup = (id) => setOpen((o) => { const next = { ...o, [id]: !o[id] }; saveOpen(next); return next; });
   const vendors = useAsync(() => api('/pharmacy/vendors', { query: { status: 'active' } }), []);
   const vendorRows = [...added.filter((a) => !(vendors.data?.rows || []).some((v) => v.id === a.id)), ...(vendors.data?.rows || [])]
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -367,7 +357,15 @@ export default function StockIps() {
     { g: 'stock', id: 's_disc', head: 'stockin.sDisc', w: 65, td: ({ r, bad }) => numBox(r, 's_disc', t('stockin.sDisc'), { className: bad('ips.lineSDisc') }) },
     { g: 'stock', id: 'sel', head: 'stockin.sel', w: 85, ro: true, td: ({ r }) => (num(r.mrp) ? selAmount({ mrp: r.mrp, disc_percent: r.s_disc }).toFixed(2) : '') },
   ];
-  const shown = COLUMNS.filter((c) => open[c.g] || c.main);
+  const cols = useGridColumns('pharmacy.ips', [{ id: 'name', w: 220 }, ...COLUMNS],
+    Object.fromEntries(COLUMNS.filter((c) => c.g === 'item').map((c) => [c.id, true])));
+  const shown = COLUMNS.filter((c) => !cols.isHidden(c.id));
+  const groupOpen = (g) => COLUMNS.filter((c) => c.g === g).every((c) => !cols.isHidden(c.id));
+  // the group arrow: open → hide all but the group's main columns; anything hidden → show all of the group
+  const toggleGroup = (g) => cols.setGroup(g, !groupOpen(g));
+  const emptyGroups = GROUPS.filter((g) => !shown.some((c) => c.g === g.id)).length;
+  const tableWidth = 32 + cols.widthOf('name') + shown.reduce((sum, c) => sum + cols.widthOf(c.id), 0) + emptyGroups * 32 + 64;
+  const resizeTitle = t('grid.resize');
 
   return (
     <div className="card max-md:!px-3">
@@ -477,18 +475,37 @@ export default function StockIps() {
         {/* Wide screens: the grid, columns grouped as on the Item, Purchase / Order and Stock In screens; each group opens /
             closes with the arrow in its heading (closed: only its main columns). It scrolls in its own box with the
             headings on top and # / Item Name on the left. */}
-        <div className="mt-3 hidden max-h-[65vh] overflow-auto rounded-lg border border-ink-200 md:block">
-          <table className="w-full border-separate border-spacing-0 text-left text-12" style={{ minWidth: 300 + shown.reduce((s2, c) => s2 + c.w, 0) }}>
+        <div className="mt-3 hidden items-center gap-3 md:flex">
+          <ColumnsMenu groups={GROUPS.map((g) => ({ id: g.id, label: t(g.label) }))} cols={cols}
+            columns={COLUMNS.map((c) => ({ id: c.id, g: c.g, label: t(c.head) }))}
+            labels={{ button: t('grid.columns'), hidden: t('grid.hiddenN'), hint: t('grid.hint'), showAll: t('grid.showAll'), resetWidths: t('grid.resetWidths') }} />
+          <span className="text-11 text-ink-400">{t('grid.dragHint')}</span>
+        </div>
+        <div className="mt-2 hidden max-h-[65vh] overflow-auto rounded-lg border border-ink-200 md:block">
+          <table className="table-fixed border-separate border-spacing-0 text-left text-12" style={{ width: tableWidth, minWidth: '100%' }}>
+            {/* each column's width (a fixed table takes them from here, not from the merged group headings) */}
+            <colgroup>
+              <col style={{ width: 32 }} />
+              <col style={{ width: cols.widthOf('name') }} />
+              {GROUPS.map((g) => {
+                const inGroup = shown.filter((c) => c.g === g.id);
+                return inGroup.length ? inGroup.map((c) => <col key={c.id} style={{ width: cols.widthOf(c.id) }} />) : <col key={g.id} style={{ width: 32 }} />;
+              })}
+              <col style={{ width: 64 }} />
+            </colgroup>
             <thead className="sticky top-0 z-20">
               <tr>
                 <th className={`${grp} ${freeze0} z-30 bg-ink-50 text-ink-500`} rowSpan={2}>#</th>
-                <th className={`${grp} ${freeze1} z-30 bg-violet-50 !text-left text-violet-700`} rowSpan={2}>{t('items.name')}</th>
+                <th className={`${grp} ${freeze1} z-30 bg-violet-50 !text-left text-violet-700`} rowSpan={2} style={{ width: cols.widthOf('name') }}>
+                  {t('items.name')}
+                  <ResizeHandle title={resizeTitle} {...cols.handle('name')} />
+                </th>
                 {GROUPS.map((g) => {
-                  const isOpen = open[g.id];
-                  const cols = shown.filter((c) => c.g === g.id);
-                  const hidden = COLUMNS.filter((c) => c.g === g.id).length - cols.length;
+                  const isOpen = groupOpen(g.id);
+                  const inGroup = shown.filter((c) => c.g === g.id);
+                  const hidden = COLUMNS.filter((c) => c.g === g.id).length - inGroup.length;
                   return (
-                    <th key={g.id} colSpan={Math.max(cols.length, 1)} className={`${grp} ${g.tone} !p-0`}>
+                    <th key={g.id} colSpan={Math.max(inGroup.length, 1)} className={`${grp} ${g.tone} !p-0`}>
                       <button type="button" className="flex w-full items-center justify-center gap-1.5 px-1 py-1 hover:brightness-95" aria-expanded={isOpen}
                         title={isOpen ? t('ips.groupClose') : t('ips.groupOpen', { n: hidden })} onClick={() => toggleGroup(g.id)}>
                         {isOpen ? <ChevronsLeft size={14} /> : <ChevronsRight size={14} />}
@@ -502,11 +519,16 @@ export default function StockIps() {
               </tr>
               <tr className="font-bold">
                 {GROUPS.map((g) => {
-                  const cols = shown.filter((c) => c.g === g.id);
-                  if (!cols.length) {
+                  const inGroup = shown.filter((c) => c.g === g.id);
+                  if (!inGroup.length) {
                     return <th key={g.id} className={`${hd} w-8 ${g.tone}`} title={t('ips.groupOpen', { n: COLUMNS.filter((c) => c.g === g.id).length })}>…</th>;
                   }
-                  return cols.map((c) => <th key={c.id} className={`${hd} ${g.tone}`} style={{ width: c.w }}>{t(c.head)}</th>);
+                  return inGroup.map((c) => (
+                    <th key={c.id} className={`${hd} ${g.tone} relative`} style={{ width: cols.widthOf(c.id) }}>
+                      {t(c.head)}
+                      <ResizeHandle title={resizeTitle} {...cols.handle(c.id)} />
+                    </th>
+                  ));
                 })}
               </tr>
             </thead>
@@ -523,7 +545,7 @@ export default function StockIps() {
                 return (
                   <tr key={r.key} className={bg} title={problem ? problemText(problem, n) : undefined}>
                     <td className={`${cell} ${freeze0} ${bg} text-center text-ink-400`}>{n + 1}</td>
-                    <td className={`${cell} ${freeze1} ${bg}`}>
+                    <td data-col="name" className={`${cell} ${freeze1} ${bg}`}>
                       {locked ? <span className="block px-1.5 py-1">{r.name}</span> : (
                         <ItemPicker inputClass={`${GRID_INPUT} ${ctx.bad('ips.lineName')} ${ctx.bad('ips.lineRepeat')}`} value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />
                       )}
@@ -531,9 +553,9 @@ export default function StockIps() {
                       {problem && <span className="block px-1.5 text-10 text-red-600">{problemText(problem, n)}</span>}
                     </td>
                     {GROUPS.map((g) => {
-                      const cols = shown.filter((c) => c.g === g.id);
-                      if (!cols.length) return <td key={g.id} className={`${cell} text-center text-ink-300`}>…</td>;
-                      return cols.map((c) => <td key={c.id} className={`${cell} ${c.ro ? ro : ''} ${c.className || ''}`}>{c.td(ctx)}</td>);
+                      const inGroup = shown.filter((c) => c.g === g.id);
+                      if (!inGroup.length) return <td key={g.id} className={`${cell} text-center text-ink-300`}>…</td>;
+                      return inGroup.map((c) => <td key={c.id} data-col={c.id} className={`${cell} ${c.ro ? ro : ''} ${c.className || ''}`}>{c.td(ctx)}</td>);
                     })}
                     <td className={`${cell} whitespace-nowrap text-center`}>
                       {!locked && (
