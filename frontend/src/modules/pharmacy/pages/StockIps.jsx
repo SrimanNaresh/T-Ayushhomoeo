@@ -9,18 +9,20 @@
 // Stock In can't be saved after the order was, the order is kept and Save tries only the Stock In again.
 // Wide screens: a grid with the columns grouped Item / Purchase / Stock In. Phones: one card per line.
 import { useState } from 'react';
-import { Layers, Save, X, Plus, Trash2, Sparkles } from 'lucide-react';
+import { Layers, Save, X, Plus, Trash2, Sparkles, ScanLine } from 'lucide-react';
 import { api } from '../../../lib/api.js';
 import { useT } from '../../../lib/i18n.jsx';
 import { money, todayLocal } from '../../../lib/format.js';
 import { arrowMove, focusNewRow } from '../../../lib/tableKeys.js';
-import { typeMMYY, mmyyToMonth } from '../../../lib/months.js';
+import { typeMMYY, mmyyToMonth, monthToMMYY } from '../../../lib/months.js';
 import { CardHeader, Note, GRID_INPUT, GRID_BAD, FORM_ACTIONS, RowAction, useAsync, useToast } from '../../../components/ui.jsx';
 import { CardField, ItemCard, CardValue, cardBox, cardBad } from '../../../components/MobileCard.jsx';
 import ItemPicker from '../../../components/ItemPicker.jsx';
 import VendorPicker from '../../../components/VendorPicker.jsx';
 import { calcLine, splitGst } from '../../../../../shared/purchase.js';
 import { selAmount } from '../../../../../shared/stockin.js';
+import ScanBillModal from './ScanBillModal.jsx';
+import { compact, likeness } from '../utils/billScan.js';
 
 const MAX_GST = 28;
 const num = (v) => Number(v || 0);
@@ -55,6 +57,16 @@ function rowProblem(r) {
   return null;
 }
 const isBlank = (r) => !r.name.trim() && !num(r.qty) && !num(r.mrp);
+// Scan Bill: a line is a repeat when Item Name + HSN + Batch are the same (one item in two batches is two lines)
+const lineKey = (r) => `${compact(r.name)}|${String(r.hsn || '').replace(/\D/g, '')}|${compact(r.batch)}`;
+// A bill's Pack as the pack size: "10's" / "10" → 10, "1x15" → 15, "10x10" → 100; anything else → ''
+function packSizeOf(pack) {
+  const s = String(pack || '').trim().toLowerCase();
+  const times = /^(\d+)\s*[x×*]\s*(\d+)/.exec(s);
+  if (times) return String(Number(times[1]) * Number(times[2]));
+  const count = /^(\d+)\s*('?s|tabs?|caps?|nos|pcs?)?$/.exec(s);
+  return count && Number(count[1]) > 0 ? String(Number(count[1])) : '';
+}
 const lineCalc = (r) => calcLine({ p_rate: r.p_rate, disc_percent: r.disc, qty: r.qty, ...splitGst(r.gst) });
 
 export default function StockIps() {
@@ -69,6 +81,63 @@ export default function StockIps() {
   const setRow = (key, patch) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
   const removeRow = (key) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow()]));
   const locked = !!savedOrder;   // the order is saved: only the Stock In columns can still change
+  const [scanOpen, setScanOpen] = useState(false);
+
+  // Scan Bill: the bill's lines fill the table after the rows already typed; repeats are left out. A line whose
+  // name is exactly an item's (case, spaces and punctuation aside) is that item; any other becomes a new item.
+  // The bill's vendor is picked when one in the Vendor List has very nearly that name; its date fills Date.
+  async function fromBill(lines, { supplier } = {}) {
+    setScanOpen(false);
+    const found = new Map();   // compact name → item
+    await Promise.all([...new Set(lines.map((b) => b.name.trim()))].map(async (name) => {
+      try {
+        const r = await api('/pharmacy/item-master', { query: { q: name, status: 'active', limit: 20 } });
+        const it = r.rows.find((i) => compact(i.name) === compact(name));
+        if (it) found.set(compact(name), it);
+      } catch { /* not found: a new item */ }
+    }));
+    const have = new Set(rows.filter((r) => !isBlank(r)).map(lineKey));
+    const add = [];
+    let repeats = 0;
+    for (const b of lines) {
+      const it = found.get(compact(b.name));
+      const r = {
+        ...newRow(), name: it ? it.name : b.name, manufacturer: b.manufacturer || it?.manufacturer || '', hsn: b.hsnCode || it?.hsn_code || '',
+        category: b.category || it?.category || '', unit: packSizeOf(b.pack) || it?.unit || '',
+        mrp: b.mrp || (num(it?.mrp) ? String(num(it.mrp)) : ''), p_rate: b.pRate, disc: b.disc,
+        gst: b.gst || (num(it?.gst_percent) ? String(num(it.gst_percent)) : ''), qty: b.qty, free: b.free,
+        batch: b.batch || b.category, mfg: monthToMMYY(b.mfg), exp: monthToMMYY(b.exp), s_disc: b.sDisc,
+        item_id: it ? it.id : null,
+      };
+      // S.Disc % from a selling price on the bill, when it has no S.Disc % column
+      if (!r.s_disc && num(b.sel) > 0 && num(r.mrp) >= num(b.sel)) r.s_disc = String(Math.round((1 - num(b.sel) / num(r.mrp)) * 10000) / 100);
+      const k = lineKey(r);
+      if (have.has(k)) { repeats += 1; continue; }
+      have.add(k);
+      add.push(r);
+    }
+    setRows((rs) => [...rs.filter((r) => !isBlank(r)), ...add, ...(add.length ? [] : [newRow()])]);
+
+    const notes = [];
+    if (!locked && supplier?.billDate && supplier.billDate <= todayLocal()) {
+      setHead((h) => ({ ...h, date: supplier.billDate }));
+      notes.push(t('ips.scanDate'));
+    }
+    if (!locked && supplier?.vendorName && !head.supplier_id) {
+      const best = (vendors.data?.rows || []).map((v) => ({ v, score: likeness(v.name, supplier.vendorName) })).sort((a, b) => b.score - a.score)[0];
+      if (best && best.score >= 0.85) {
+        setHead((h) => ({ ...h, supplier_id: String(best.v.id) }));
+        notes.push(t('ips.scanVendor', { name: best.v.name }));
+      } else {
+        notes.push(t('ips.scanVendorMissing', { name: supplier.vendorName }));
+      }
+    }
+    toast([
+      t('ips.scanFilled', { n: add.length }),
+      notes.length ? t('ips.scanFilledIn', { list: notes.join(', ') }) : '',
+      repeats ? t('ips.scanRepeats', { n: repeats }) : '',
+    ].filter(Boolean).join(' · '));
+  }
 
   // an existing item fills its details from the Item List; typing a new name makes it a new item
   const pickItem = (r) => (p) => {
@@ -172,7 +241,12 @@ export default function StockIps() {
   return (
     <div className="card max-md:!px-3">
       <form onSubmit={submit} noValidate>
-        <CardHeader icon={Layers} title={t('menu.threeInOne')} subtitle={<span className="hidden md:inline">{t('ips.hint')}</span>} />
+        <CardHeader icon={Layers} title={t('menu.threeInOne')} subtitle={<span className="hidden md:inline">{t('ips.hint')}</span>}
+          actions={(
+            <button type="button" className="btn-secondary" disabled={locked || !!saving} title={t('ips.scanHint')} onClick={() => setScanOpen(true)}>
+              <ScanLine size={16} /> {t('ips.scan')}
+            </button>
+          )} />
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(14rem,3fr)_minmax(9rem,1fr)_minmax(10rem,1fr)]">
           <VendorPicker label={t('purchase.vendor')} required vendors={vendors.data?.rows || []} value={head.supplier_id}
@@ -337,6 +411,7 @@ export default function StockIps() {
           <button type="submit" className="btn-primary px-2 sm:px-4" disabled={!!saving}><Save size={16} /> {saving ? t('common.saving') : t('common.save')}</button>
         </div>
       </form>
+      <ScanBillModal open={scanOpen} onClose={() => setScanOpen(false)} onLines={fromBill} />
     </div>
   );
 }
