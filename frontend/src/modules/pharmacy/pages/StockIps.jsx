@@ -1,65 +1,51 @@
-// Pharmacy → Stock In → Three in One (IPS): Item, Purchase Order and Stock In in one entry.
-// Pick the vendor, type the bill's lines (an item not in the Item List is added as a new item), check them,
-// and one Save:
-//   1. adds the new items to the Item List (Pack size, Category, HSN, Manufacturer, MRP, GST as typed),
-//   2. saves the Purchase Order (Rate = P.Rate less Disc %; shared/purchase.js),
-//   3. saves the Stock In for all of it (Batch, Mf / Exp month, S.Disc %), which adds the stock and sets
+// Pharmacy → Stock In → Three in One (IPS): Item, Purchase Order and Stock In in one entry, as in Ayush All In One.
+// Pick the vendor (or add one), scan the supplier's bill or type its lines, check the table – its columns grouped
+// as on the Item, Purchase / Order and Stock In screens – and one Save:
+//   1. adds the lines' new items to the Item List (an item with the same Item Name, and no other HSN or Category,
+//      is used as it is),
+//   2. saves the Purchase Order (P.Rate = MRP less Disc %; Round Off; the vendor's details; shared/purchase.js),
+//   3. saves the Stock In for all of it (Bill No, Batch No, Mf / Exp month, S.Disc %), which adds the stock and sets
 //      each item's selling price (Sel.Amount = MRP less S.Disc %; shared/stockin.js).
-// Each step goes through its own screen's server checks; the rows are checked the same way first. If the
-// Stock In can't be saved after the order was, the order is kept and Save tries only the Stock In again.
-// Wide screens: a grid with the columns grouped Item / Purchase / Stock In. Phones: one card per line.
-import { useState } from 'react';
-import { Layers, Save, X, Plus, Trash2, Sparkles, ScanLine } from 'lucide-react';
+// Each step goes through its own screen's server checks; the rows are checked the same way first. If the Stock In
+// can't be saved after the order was, the order is kept and Save tries only the Stock In again.
+// Wide screens: the grid (headings and # / Item Name stay in view while it scrolls). Phones: one card per line.
+import { useEffect, useRef, useState } from 'react';
+import { Layers, Save, X, Plus, Trash2, Sparkles, ScanLine, List, ChevronLeft, ChevronRight } from 'lucide-react';
 import { api } from '../../../lib/api.js';
 import { useT } from '../../../lib/i18n.jsx';
+import { navigate } from '../../../lib/router.jsx';
 import { money, todayLocal } from '../../../lib/format.js';
-import { arrowMove, focusNewRow } from '../../../lib/tableKeys.js';
+import { arrowMove } from '../../../lib/tableKeys.js';
 import { typeMMYY, mmyyToMonth, monthToMMYY } from '../../../lib/months.js';
-import { CardHeader, Note, GRID_INPUT, GRID_BAD, FORM_ACTIONS, RowAction, useAsync, useToast } from '../../../components/ui.jsx';
+import { CardHeader, Note, GRID_INPUT, GRID_BAD, RowAction, useAsync, useToast } from '../../../components/ui.jsx';
 import { CardField, ItemCard, CardValue, cardBox, cardBad } from '../../../components/MobileCard.jsx';
 import ItemPicker from '../../../components/ItemPicker.jsx';
 import VendorPicker from '../../../components/VendorPicker.jsx';
-import { calcLine, splitGst } from '../../../../../shared/purchase.js';
+import { calcLine, discOf, priced, roundOffOf, splitGst } from '../../../../../shared/purchase.js';
 import { selAmount } from '../../../../../shared/stockin.js';
 import ScanBillModal from './ScanBillModal.jsx';
+import NewVendorBox, { vendorDetails } from './NewVendorBox.jsx';
 import { compact, likeness } from '../utils/billScan.js';
 
 const MAX_GST = 28;
 const num = (v) => Number(v || 0);
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const numStr = (v) => (num(v) ? String(num(v)) : '');
 const thisMonth = () => todayLocal().slice(0, 7);
+const digits = (s) => String(s || '').replace(/\D/g, '');
+const code = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const newRow = () => ({
-  key: Math.random().toString(36).slice(2), item_id: null, name: '',
-  category: '', unit: '', hsn: '', manufacturer: '',
-  mrp: '', p_rate: '', disc: '', gst: '', qty: '', free: '',
+  key: Math.random().toString(36).slice(2), item_id: null, item_code: '', name: '',
+  generic: '', manufacturer: '', hsn: '', category: '', pack: '', unit: '', rack: '',
+  mrp: '', disc: '', p_rate: '', qty: '', free: '', gst: '',
   batch: '', mfg: '', exp: '', s_disc: '',
 });
-const EMPTY_HEAD = () => ({ supplier_id: '', date: todayLocal(), bill_no: '' });
+const EMPTY_HEAD = () => ({ supplier_id: '', date: todayLocal(), bill_no: '', details: '' });
 
-const cell = 'border border-ink-200 px-0.5 py-0.5 align-top';
-const hd = 'border border-ink-200 px-0.5 py-1.5 text-center align-middle text-10 xl:text-11';
-const grp = 'border border-ink-200 px-1 py-1 text-center text-11 font-bold uppercase tracking-wide';
-const ro = 'px-1 text-right tabular-nums text-ink-600';
-
-/** What is wrong with a row (i18n key), or null; empty rows are skipped by the caller */
-function rowProblem(r) {
-  if (!r.name.trim()) return 'ips.lineName';
-  if (!(num(r.qty) > 0)) return 'ips.lineQty';
-  if (!(num(r.mrp) > 0)) return 'ips.lineMrp';
-  if (num(r.p_rate) > num(r.mrp)) return 'ips.lineOverMrp';
-  if (num(r.disc) > 100 || num(r.s_disc) > 100) return 'ips.lineDisc';
-  if (num(r.gst) > MAX_GST) return 'ips.lineGst';
-  const mfg = mmyyToMonth(r.mfg);
-  const exp = mmyyToMonth(r.exp);
-  if (mfg === null || exp === null) return 'ips.lineMonth';
-  if (exp && exp < thisMonth()) return 'ips.lineExpPast';
-  if (mfg && mfg > thisMonth()) return 'ips.lineMfgFuture';
-  if (mfg && exp && exp <= mfg) return 'ips.lineExpAfter';
-  return null;
-}
-const isBlank = (r) => !r.name.trim() && !num(r.qty) && !num(r.mrp);
-// Scan Bill: a line is a repeat when Item Name + HSN + Batch are the same (one item in two batches is two lines)
-const lineKey = (r) => `${compact(r.name)}|${String(r.hsn || '').replace(/\D/g, '')}|${compact(r.batch)}`;
-// A bill's Pack as the pack size: "10's" / "10" → 10, "1x15" → 15, "10x10" → 100; anything else → ''
+const isBlank = (r) => !compact(r.name) && !num(r.qty) && !num(r.mrp);
+// What makes two rows the same entry (the second is a repeat): Item Name + HSN + Batch (one item in two batches is two lines)
+const entryKey = (r) => (compact(r.name) ? `${compact(r.name)}|${digits(r.hsn)}|${code(r.batch || r.category)}` : '');
+// A bill's Pack as a count for Unit when the bill has no Unit: "10's" / "10" → 10, "1x15" → 15, "10x10" → 100
 function packSizeOf(pack) {
   const s = String(pack || '').trim().toLowerCase();
   const times = /^(\d+)\s*[x×*]\s*(\d+)/.exec(s);
@@ -67,56 +53,146 @@ function packSizeOf(pack) {
   const count = /^(\d+)\s*('?s|tabs?|caps?|nos|pcs?)?$/.exec(s);
   return count && Number(count[1]) > 0 ? String(Number(count[1])) : '';
 }
-const lineCalc = (r) => calcLine({ p_rate: r.p_rate, disc_percent: r.disc, qty: r.qty, ...splitGst(r.gst) });
+/** The Item List item this row is: the same Item Name, with no other HSN or Category (a blank one doesn't count) */
+const sameItem = (i, r) => {
+  const differs = (a, b) => a !== '' && b !== '' && a !== b;
+  return compact(i.name) === compact(r.name) && !differs(digits(i.hsn_code), digits(r.hsn)) && !differs(code(i.category), code(r.category));
+};
+async function findItem(r) {
+  try {
+    const res = await api('/pharmacy/item-master', { query: { q: r.name.trim(), limit: 20 } });
+    return res.rows.find((i) => sameItem(i, r)) || null;
+  } catch {
+    return null;
+  }
+}
+/** An existing item's details on a row (empty boxes only when `onlyEmpty`), with its MRP, P.Rate, Disc % and GST % */
+function withItem(r, i, onlyEmpty = false) {
+  const fill = {
+    generic: i.generic_name, manufacturer: i.manufacturer, hsn: i.hsn_code, category: i.category,
+    pack: i.pack, unit: i.unit, rack: i.rack,
+  };
+  const patch = { item_id: i.id, item_code: i.item_code || '', name: i.name };
+  for (const [f, v] of Object.entries(fill)) if (!onlyEmpty || !r[f]) patch[f] = v ? String(v) : '';
+  if ((!onlyEmpty || !r.mrp) && num(i.mrp)) patch.mrp = String(num(i.mrp));
+  if ((!onlyEmpty || !r.p_rate) && num(i.purchase_rate)) patch.p_rate = String(num(i.purchase_rate));
+  const mrp = patch.mrp ?? r.mrp;
+  const rate = patch.p_rate ?? r.p_rate;
+  if (patch.mrp || patch.p_rate) patch.disc = String(discOf(mrp, rate) || '');
+  const gst = num(i.cgst_percent) + num(i.sgst_percent) || num(i.gst_percent);
+  if ((!onlyEmpty || !r.gst) && gst) patch.gst = String(r2(gst));
+  return patch;
+}
+
+/** What is wrong with a row: [i18n key, params], or null (same checks as the servers) */
+function rowProblem(r, firstOf) {
+  if (!compact(r.name)) return ['ips.lineName'];
+  if (firstOf != null) return ['ips.lineRepeat', { m: firstOf + 1 }];
+  if (!(num(r.qty) > 0)) return ['ips.lineQty'];
+  if (num(r.free) < 0) return ['ips.lineFree'];
+  if (!(num(r.mrp) > 0)) return ['ips.lineMrp'];
+  if (!(num(r.p_rate) > 0)) return ['ips.lineRate'];
+  if (num(r.p_rate) > num(r.mrp)) return ['ips.lineOverMrp', { mrp: money(r.mrp) }];
+  if (num(r.disc) > 100) return ['ips.lineDisc'];
+  if (num(r.gst) > MAX_GST) return ['ips.lineGst'];
+  if (!r.batch.trim()) return ['ips.lineBatch'];
+  if (!r.exp.trim()) return ['ips.lineExp'];
+  const mfg = mmyyToMonth(r.mfg);
+  const exp = mmyyToMonth(r.exp);
+  if (mfg === null || exp === null) return ['ips.lineMonth'];
+  if (exp < thisMonth()) return ['ips.lineExpPast'];
+  if (mfg && mfg > thisMonth()) return ['ips.lineMfgFuture'];
+  if (mfg && exp <= mfg) return ['ips.lineExpAfter'];
+  if (num(r.s_disc) > 100) return ['ips.lineSDisc'];
+  return null;
+}
+const lineCalc = (r) => calcLine({ p_rate: r.p_rate, qty: r.qty, ...splitGst(r.gst) });
+
+const cell = 'border border-ink-200 px-0.5 py-0.5 align-top bg-inherit';
+const hd = 'border border-ink-200 px-0.5 py-1.5 text-center align-middle text-10 xl:text-11';
+const grp = 'border border-ink-200 px-1 py-1 text-center text-11 font-bold uppercase tracking-wide';
+const ro = 'px-1 text-right tabular-nums text-ink-600';
+const freeze0 = 'sticky left-0 z-10 w-8 min-w-[2rem]';
+const freeze1 = 'sticky left-8 z-10 min-w-[220px]';
 
 export default function StockIps() {
   const { t } = useT();
   const toast = useToast();
   const [head, setHead] = useState(EMPTY_HEAD);
   const [rows, setRows] = useState([newRow()]);
+  const [roundOn, setRoundOn] = useState(true);
+  const [showDetails, setShowDetails] = useState(false);
+  const [newVendor, setNewVendor] = useState(null);
+  const [added, setAdded] = useState([]);            // vendors added here, until the list is loaded again
   const [saving, setSaving] = useState('');            // the step being saved ('' = idle)
   const [savedOrder, setSavedOrder] = useState(null);  // an order saved whose Stock In failed
+  const [scanOpen, setScanOpen] = useState(false);
   const vendors = useAsync(() => api('/pharmacy/vendors', { query: { status: 'active' } }), []);
+  const vendorRows = [...added.filter((a) => !(vendors.data?.rows || []).some((v) => v.id === a.id)), ...(vendors.data?.rows || [])]
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const locked = !!savedOrder;   // the order is saved: only the Stock In columns can still change
 
   const setRow = (key, patch) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
   const removeRow = (key) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow()]));
-  const locked = !!savedOrder;   // the order is saved: only the Stock In columns can still change
-  const [scanOpen, setScanOpen] = useState(false);
+  const addRowAfter = (key) => setRows((rs) => rs.flatMap((r) => (r.key === key ? [r, newRow()] : [r])));
+  const setPrice = (r, key, value) => setRow(r.key, priced(r, key, value));
+  const chooseVendor = (v) => setHead((h) => ({ ...h, supplier_id: String(v.id), details: vendorDetails(v, t) }));
 
-  // Scan Bill: the bill's lines fill the table after the rows already typed; repeats are left out. A line whose
-  // name is exactly an item's (case, spaces and punctuation aside) is that item; any other becomes a new item.
-  // The bill's vendor is picked when one in the Vendor List has very nearly that name; its date fills Date.
+  // Old Price: this vendor's last P.Rate for each item on the table (0 when never ordered from them)
+  const itemIds = [...new Set(rows.filter((r) => r.item_id).map((r) => r.item_id))].sort((a, b) => a - b).join(',');
+  const oldPrices = useAsync(
+    () => (head.supplier_id && itemIds ? api('/pharmacy/purchase-orders/old-prices', { query: { supplier_id: head.supplier_id, item_ids: itemIds } }) : Promise.resolve({})),
+    [head.supplier_id, itemIds],
+  );
+
+  // Typing a name: once it stops, an Item List item with that name (and no other HSN / Category) is linked,
+  // filling the row's empty boxes – so "In Item List" / "New item" shows as you type, as in All In One.
+  const timers = useRef(new Map());
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  const lookUp = (r) => {
+    clearTimeout(timers.current.get(r.key));
+    if (!compact(r.name)) return;
+    timers.current.set(r.key, setTimeout(async () => {
+      const i = await findItem(r);
+      if (i) setRows((rs) => rs.map((x) => (x.key === r.key && !x.item_id && compact(x.name) === compact(r.name) ? { ...x, ...withItem(x, i, true) } : x)));
+    }, 450));
+  };
+  const pickItem = (r) => (p) => {
+    if (p.item_id) { setRow(r.key, withItem(r, p.item || { id: p.item_id, name: p.medicine_name })); return; }
+    const next = { ...r, item_id: null, item_code: '', name: p.medicine_name };
+    setRow(r.key, { item_id: null, item_code: '', name: p.medicine_name });
+    lookUp(next);
+  };
+
+  // Scan Bill: the bill's lines fill the table after the rows already typed; repeats are left out. Lines whose
+  // item is in the Item List are linked to it. The bill's vendor is picked when one in the Vendor List has very
+  // nearly that name (else it is offered as a new vendor); its date fills Date.
   async function fromBill(lines, { supplier } = {}) {
     setScanOpen(false);
-    const found = new Map();   // compact name → item
-    await Promise.all([...new Set(lines.map((b) => b.name.trim()))].map(async (name) => {
-      try {
-        const r = await api('/pharmacy/item-master', { query: { q: name, status: 'active', limit: 20 } });
-        const it = r.rows.find((i) => compact(i.name) === compact(name));
-        if (it) found.set(compact(name), it);
-      } catch { /* not found: a new item */ }
-    }));
-    const have = new Set(rows.filter((r) => !isBlank(r)).map(lineKey));
+    const have = new Set(rows.filter((r) => !isBlank(r)).map(entryKey));
     const add = [];
     let repeats = 0;
     for (const b of lines) {
-      const it = found.get(compact(b.name));
-      const r = {
-        ...newRow(), name: it ? it.name : b.name, manufacturer: b.manufacturer || it?.manufacturer || '', hsn: b.hsnCode || it?.hsn_code || '',
-        category: b.category || it?.category || '', unit: packSizeOf(b.pack) || it?.unit || '',
-        mrp: b.mrp || (num(it?.mrp) ? String(num(it.mrp)) : ''), p_rate: b.pRate, disc: b.disc,
-        gst: b.gst || (num(it?.gst_percent) ? String(num(it.gst_percent)) : ''), qty: b.qty, free: b.free,
-        batch: b.batch || b.category, mfg: monthToMMYY(b.mfg), exp: monthToMMYY(b.exp), s_disc: b.sDisc,
-        item_id: it ? it.id : null,
+      let r = {
+        ...newRow(), name: b.name, generic: b.generic, manufacturer: b.manufacturer, hsn: b.hsnCode, category: b.category,
+        pack: b.pack, unit: b.unit || packSizeOf(b.pack), rack: b.rack, mrp: numStr(b.mrp), disc: numStr(b.disc), p_rate: numStr(b.pRate),
+        qty: numStr(b.qty), free: numStr(b.free), gst: numStr(b.gst),
+        batch: b.batch || b.category, mfg: monthToMMYY(b.mfg), exp: monthToMMYY(b.exp), s_disc: numStr(b.sDisc),
       };
-      // S.Disc % from a selling price on the bill, when it has no S.Disc % column
-      if (!r.s_disc && num(b.sel) > 0 && num(r.mrp) >= num(b.sel)) r.s_disc = String(Math.round((1 - num(b.sel) / num(r.mrp)) * 10000) / 100);
-      const k = lineKey(r);
-      if (have.has(k)) { repeats += 1; continue; }
+      // P.Rate = MRP less Disc % (or the Disc % from the bill's rate); S.Disc % from a selling price
+      if (r.disc !== '') r = { ...r, ...priced(r, 'disc', r.disc) };
+      else if (num(r.p_rate) > 0) r = { ...r, ...priced(r, 'p_rate', r.p_rate) };
+      if (r.s_disc === '' && num(b.sel) > 0 && num(r.mrp) >= num(b.sel)) r.s_disc = String(r2((1 - num(b.sel) / num(r.mrp)) * 100));
+      const k = entryKey(r);
+      if (k && have.has(k)) { repeats += 1; continue; }
       have.add(k);
       add.push(r);
     }
-    setRows((rs) => [...rs.filter((r) => !isBlank(r)), ...add, ...(add.length ? [] : [newRow()])]);
+    const linked = await Promise.all(add.map(async (r) => {
+      const i = await findItem(r);
+      return i ? { ...r, ...withItem(r, i, true) } : r;
+    }));
+    setRows((rs) => [...rs.filter((r) => !isBlank(r)), ...linked, ...(linked.length ? [] : [newRow()])]);
 
     const notes = [];
     if (!locked && supplier?.billDate && supplier.billDate <= todayLocal()) {
@@ -124,83 +200,86 @@ export default function StockIps() {
       notes.push(t('ips.scanDate'));
     }
     if (!locked && supplier?.vendorName && !head.supplier_id) {
-      const best = (vendors.data?.rows || []).map((v) => ({ v, score: likeness(v.name, supplier.vendorName) })).sort((a, b) => b.score - a.score)[0];
+      const best = vendorRows.map((v) => ({ v, score: likeness(v.name, supplier.vendorName) })).sort((a, b) => b.score - a.score)[0];
       if (best && best.score >= 0.85) {
-        setHead((h) => ({ ...h, supplier_id: String(best.v.id) }));
+        chooseVendor(best.v);
         notes.push(t('ips.scanVendor', { name: best.v.name }));
       } else {
-        notes.push(t('ips.scanVendorMissing', { name: supplier.vendorName }));
+        setNewVendor({ name: supplier.vendorName, address: supplier.address || '', mobile: supplier.mobile || '' });
+        notes.push(t('ips.scanNewVendor'));
       }
     }
     toast([
-      t('ips.scanFilled', { n: add.length }),
+      t('ips.scanFilled', { n: linked.length }),
       notes.length ? t('ips.scanFilledIn', { list: notes.join(', ') }) : '',
       repeats ? t('ips.scanRepeats', { n: repeats }) : '',
     ].filter(Boolean).join(' · '));
   }
 
-  // an existing item fills its details from the Item List; typing a new name makes it a new item
-  const pickItem = (r) => (p) => {
-    if (!p.item_id) { setRow(r.key, { item_id: null, name: p.medicine_name }); return; }
-    const i = p.item || {};
-    setRow(r.key, {
-      item_id: p.item_id, name: i.name || p.medicine_name,
-      category: i.category || '', unit: i.unit || '', hsn: i.hsn_code || '', manufacturer: i.manufacturer || '',
-      mrp: num(i.mrp) ? String(num(i.mrp)) : r.mrp, p_rate: num(i.purchase_rate) ? String(num(i.purchase_rate)) : r.p_rate,
-      gst: num(i.gst_percent) ? String(num(i.gst_percent)) : r.gst,
-    });
-  };
-
-  const filled = rows.filter((r) => !isBlank(r));
-  const problems = new Map(filled.map((r) => [r.key, rowProblem(r)]));
-  const sum = Math.round(filled.reduce((s, r) => s + lineCalc(r).total, 0) * 100) / 100;
+  // each row's problem, the first row with the same entry, and its sums
+  const firstSeen = new Map();
+  const view = rows.map((r, n) => {
+    const used = !isBlank(r);
+    const k = entryKey(r);
+    const first = k && firstSeen.has(k) ? firstSeen.get(k) : null;
+    if (k && !firstSeen.has(k)) firstSeen.set(k, n);
+    return { r, used, problem: used ? rowProblem(r, first) : null, calc: lineCalc(r) };
+  });
+  const usedRows = view.filter((v) => v.used);
+  const newCount = usedRows.filter((v) => !v.r.item_id).length;
+  const sum = r2(usedRows.reduce((s, v) => s + v.calc.total, 0));
+  const roundOff = roundOn ? roundOffOf(sum) : 0;
+  const problemText = (p, n) => (p ? `${t('ips.lineN', { n: n + 1 })}: ${t(p[0], p[1])}` : '');
 
   function validate() {
     if (!head.supplier_id) return t('purchase.chooseVendor');
+    if (!head.date) return t('common.isRequired', { field: t('purchase.date') });
     if (!head.bill_no.trim()) return t('ips.billNoRequired');
-    if (!filled.length) return t('ips.empty');
-    for (const [n, r] of rows.entries()) {
-      const p = problems.get(r.key);
-      if (p) return t(p, { n: n + 1 });
-    }
-    return null;
+    if (!usedRows.length) return t('ips.empty');
+    const bad = view.findIndex((v) => v.problem);
+    return bad >= 0 ? problemText(view[bad].problem, bad) : null;
   }
 
-  const reset = () => { setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); };
+  const reset = () => { setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); setRoundOn(true); setNewVendor(null); setShowDetails(false); };
 
   async function submit(e) {
     e.preventDefault();
     const problem = validate();
     if (problem) return toast(problem, 'error');
+    const lines = usedRows.map((v) => v.r);
     let order = savedOrder;
+    let newItems = 0;
     try {
       if (!order) {
-        // 1. new items
+        // 1. new items (a row typed without picking is linked first if its item is in the Item List)
         setSaving('ips.stepItems');
-        const ids = new Map();
-        for (const r of filled.filter((x) => !x.item_id)) {
-          const gst = splitGst(r.gst);
+        const ids = new Map(lines.filter((r) => r.item_id).map((r) => [r.key, r.item_id]));
+        for (const r of lines.filter((x) => !x.item_id)) {
+          const found = await findItem(r);
+          if (found) { ids.set(r.key, found.id); setRow(r.key, { item_id: found.id, item_code: found.item_code || '' }); continue; }
           const item = await api('/pharmacy/item-master', {
             method: 'POST',
             body: {
-              name: r.name.trim(), category: r.category, unit: r.unit.trim() || 'nos', hsn_code: r.hsn.trim().toUpperCase(),
-              manufacturer: r.manufacturer, mrp: r.mrp, purchase_rate: lineCalc(r).rate, ...gst,
+              name: r.name.trim(), generic_name: r.generic.trim(), manufacturer: r.manufacturer.trim(), hsn_code: r.hsn.trim().toUpperCase(),
+              category: r.category.trim(), pack: r.pack.trim(), unit: r.unit.trim() || 'nos', rack: r.rack.trim(),
+              mrp: r.mrp, purchase_rate: r.p_rate, ...splitGst(r.gst),
               price: selAmount({ mrp: r.mrp, disc_percent: r.s_disc }), supplier_id: head.supplier_id, status: 'active',
             },
           });
+          newItems += 1;
           ids.set(r.key, item.id);
-          setRow(r.key, { item_id: item.id });   // kept if a later step fails, so Save does not add it twice
+          setRow(r.key, { item_id: item.id, item_code: item.item_code || '' });   // kept if a later step fails, so Save does not add it twice
         }
         // 2. the purchase order
         setSaving('ips.stepOrder');
         order = await api('/pharmacy/purchase-orders', {
           method: 'POST',
           body: {
-            supplier_id: head.supplier_id, po_date: head.date,
-            details: [t('menu.threeInOne'), head.bill_no.trim() && `${t('ips.billNo')}: ${head.bill_no.trim()}`].filter(Boolean).join(' · '),
-            lines: filled.map((r) => ({
-              item_id: r.item_id || ids.get(r.key), mrp: r.mrp, p_rate: r.p_rate, disc_percent: r.disc,
-              qty: r.qty, free_qty: r.free, ...splitGst(r.gst),
+            supplier_id: head.supplier_id, po_date: head.date, round_off: roundOn,
+            details: [head.details.trim(), `${t('menu.threeInOne')} · ${t('ips.billNo')}: ${head.bill_no.trim().toUpperCase()}`].filter(Boolean).join('\n'),
+            lines: lines.map((r) => ({
+              item_id: ids.get(r.key), mrp: r.mrp, p_rate: r.p_rate, disc_percent: r.disc || 0,
+              qty: r.qty, free_qty: r.free || 0, ...splitGst(r.gst),
             })),
           },
         });
@@ -212,13 +291,13 @@ export default function StockIps() {
         method: 'POST',
         body: {
           supplier_id: head.supplier_id, po_id: order.id, si_date: head.date, bill_no: head.bill_no.trim().toUpperCase(),
-          lines: filled.map((r, n) => ({
-            po_item_id: order.lines[n].id, qty: r.qty, free_qty: r.free || 0, batch_no: r.batch.trim(),
-            mfg_date: mmyyToMonth(r.mfg), exp_date: mmyyToMonth(r.exp), disc_percent: r.s_disc,
+          lines: lines.map((r, n) => ({
+            po_item_id: order.lines[n].id, qty: r.qty, free_qty: r.free || 0, batch_no: r.batch.trim().toUpperCase(),
+            mfg_date: mmyyToMonth(r.mfg), exp_date: mmyyToMonth(r.exp), disc_percent: r.s_disc || 0,
           })),
         },
       });
-      toast(t('ips.saved', { po: order.po_no, si: si.si_no }));
+      toast([t('ips.saved', { po: order.po_no, si: si.si_no }), newItems ? t('ips.savedNew', { n: newItems }) : ''].filter(Boolean).join(' · '));
       reset();
     } catch (err) {
       const msg = err.message || t('common.saveFailed');
@@ -231,72 +310,108 @@ export default function StockIps() {
 
   const box = (r, field, props = {}) => (
     <input className={`${GRID_INPUT} ${props.className || ''}`} value={r[field]} disabled={props.disabled}
-      aria-label={props.label} placeholder={props.placeholder} inputMode={props.inputMode}
+      aria-label={props.label} placeholder={props.placeholder} inputMode={props.inputMode} maxLength={props.maxLength}
       type={props.type || 'text'} min={props.type === 'number' ? '0' : undefined} step={props.type === 'number' ? '0.01' : undefined}
-      onChange={(e) => setRow(r.key, { [field]: props.mmyy ? typeMMYY(e.target.value) : e.target.value })} />
+      onChange={(e) => (props.onValue ? props.onValue(e.target.value) : setRow(r.key, { [field]: props.mmyy ? typeMMYY(e.target.value) : e.target.value }))} />
   );
-  const numBox = (r, field, label, extra = {}) => box(r, field, { type: 'number', inputMode: 'decimal', className: 'text-right', label, ...extra });
+  const numBox = (r, field, label, extra = {}) => box(r, field, { type: 'number', inputMode: 'decimal', label, ...extra, className: `text-right no-spin ${extra.className || ''}` });
+  const priceBox = (r, field, label, extra = {}) => numBox(r, field, label, { ...extra, onValue: (v) => setPrice(r, field, v) });
   const monthBox = (r, field, label) => box(r, field, { mmyy: true, inputMode: 'numeric', placeholder: 'MM/YY', label, className: 'text-center' });
+  const status = (r, used) => (used && compact(r.name) ? (
+    r.item_id
+      ? <span className="block px-1.5 text-10 text-ink-400">{t('ips.inList', { code: r.item_code || r.item_id })}</span>
+      : <span className="flex items-center gap-1 px-1.5 text-10 font-semibold text-violet-600"><Sparkles size={11} /> {t('ips.newItem')}</span>
+  ) : null);
+  const arrow = showDetails ? <ChevronLeft size={15} /> : <ChevronRight size={15} />;
 
   return (
     <div className="card max-md:!px-3">
       <form onSubmit={submit} noValidate>
         <CardHeader icon={Layers} title={t('menu.threeInOne')} subtitle={<span className="hidden md:inline">{t('ips.hint')}</span>}
           actions={(
-            <button type="button" className="btn-secondary" disabled={locked || !!saving} title={t('ips.scanHint')} onClick={() => setScanOpen(true)}>
-              <ScanLine size={16} /> {t('ips.scan')}
-            </button>
+            <div className="flex gap-2">
+              <button type="button" className="btn-secondary" disabled={locked || !!saving} title={t('ips.scanHint')} onClick={() => setScanOpen(true)}>
+                <ScanLine size={16} /> {t('ips.scan')}
+              </button>
+              <button type="button" className="btn-secondary hidden md:inline-flex" onClick={() => navigate('/pharmacy/stock-in-list')}>
+                <List size={16} /> {t('ips.stockInList')}
+              </button>
+            </div>
           )} />
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(14rem,3fr)_minmax(9rem,1fr)_minmax(10rem,1fr)]">
-          <VendorPicker label={t('purchase.vendor')} required vendors={vendors.data?.rows || []} value={head.supplier_id}
-            onPick={(v) => !locked && setHead((h) => ({ ...h, supplier_id: String(v.id) }))} />
+        {savedOrder && <Note tone="warning" className="mb-3">{t('ips.orderSaved', { po: savedOrder.po_no })}</Note>}
+
+        <div className={`grid grid-cols-1 gap-3 ${showDetails ? 'md:grid-cols-[minmax(14rem,3fr)_minmax(9rem,1fr)_minmax(10rem,1fr)_minmax(14rem,3fr)]' : 'md:grid-cols-[minmax(14rem,3fr)_minmax(9rem,1fr)_minmax(10rem,1fr)_auto]'}`}>
+          <VendorPicker label={t('purchase.vendor')} required vendors={vendorRows} value={head.supplier_id}
+            onPick={(v) => !locked && chooseVendor(v)} onAdd={locked ? undefined : (name) => setNewVendor({ name, address: '', mobile: '' })}
+            addon={(
+              <button type="button" className={`btn-secondary !p-1.5 ${showDetails ? '!border-brand-200 !bg-brand-50 !text-brand-700' : ''}`} aria-expanded={showDetails}
+                title={showDetails ? t('purchase.hideVendorDetails') : t('purchase.showVendorDetails')}
+                aria-label={showDetails ? t('purchase.hideVendorDetails') : t('purchase.showVendorDetails')}
+                onClick={() => setShowDetails(!showDetails)}>
+                {arrow}
+              </button>
+            )} />
           <div>
             <label className="label">{t('purchase.date')} *</label>
             <input className="input" type="date" max={todayLocal()} disabled={locked} value={head.date} onChange={(e) => setHead((h) => ({ ...h, date: e.target.value }))} />
           </div>
           <div>
             <label className="label">{t('ips.billNo')} *</label>
-            <input className="input uppercase" maxLength={50} disabled={locked} value={head.bill_no} placeholder={t('ips.billNoPh')}
-              onChange={(e) => setHead((h) => ({ ...h, bill_no: e.target.value }))} />
+            <input className="input uppercase" maxLength={50} value={head.bill_no} placeholder={t('ips.billNoPh')}
+              onChange={(e) => setHead((h) => ({ ...h, bill_no: e.target.value.toUpperCase() }))} />
           </div>
+          {showDetails ? (
+            <div>
+              <label className="label">{t('purchase.details')}</label>
+              <textarea className="input text-12" rows={4} maxLength={900} disabled={locked} value={head.details} placeholder={t('ips.vendorDetailsPh')}
+                onChange={(e) => setHead((h) => ({ ...h, details: e.target.value }))} />
+            </div>
+          ) : (
+            <p className="self-end pb-2 text-12 text-ink-500">
+              {t('ips.lineCount', { n: usedRows.length })}{newCount ? ` · ${t('ips.newCount', { n: newCount })}` : ''}
+            </p>
+          )}
         </div>
-        {savedOrder && <Note tone="warning" className="mt-3">{t('ips.orderSaved', { po: savedOrder.po_no })}</Note>}
+
+        <NewVendorBox vendor={newVendor} setVendor={setNewVendor} onSaved={(v) => { setAdded((a) => [...a, v]); chooseVendor(v); }} />
         {saving && <Note className="mt-3">{t(saving)}</Note>}
 
         {/* Phones: one card per line */}
         <div className="mt-3 space-y-2.5 md:hidden">
-          {rows.map((r, n) => {
-            const c = lineCalc(r);
-            const bad = !!problems.get(r.key);
+          {view.map(({ r, used, problem, calc }, n) => {
             const field = (f, label, extra = {}) => (
               <CardField label={label}>
                 <input className={`${cardBox} no-spin ${extra.bad ? cardBad : ''}`} value={r[f]} disabled={extra.disabled}
                   type={extra.mmyy || extra.text ? 'text' : 'number'} inputMode={extra.mmyy ? 'numeric' : extra.text ? undefined : 'decimal'}
                   placeholder={extra.mmyy ? 'MM/YY' : extra.placeholder}
-                  onChange={(e) => setRow(r.key, { [f]: extra.mmyy ? typeMMYY(e.target.value) : e.target.value })} />
+                  onChange={(e) => (extra.price ? setPrice(r, f, e.target.value) : setRow(r.key, { [f]: extra.mmyy ? typeMMYY(e.target.value) : e.target.value }))} />
               </CardField>
             );
+            const detail = !!r.item_id || locked;
             return (
-              <ItemCard key={r.key} no={n + 1} bad={bad}
+              <ItemCard key={r.key} no={n + 1} bad={!!problem}
                 title={locked ? r.name : <ItemPicker value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />}
-                sub={!r.item_id && r.name.trim() ? t('ips.newItem') : ''}
-                tag={c.total ? money(c.total) : undefined}>
-                {!r.item_id && (
+                sub={problem ? problemText(problem, n) : (used && compact(r.name) ? (r.item_id ? t('ips.inList', { code: r.item_code || r.item_id }) : t('ips.newItem')) : '')}
+                tag={calc.total ? money(calc.total) : undefined}>
+                {!detail && (
                   <div className="grid grid-cols-2 gap-1.5">
-                    {field('unit', t('ips.packSize'), { text: true, placeholder: t('ips.packSizePh'), disabled: locked })}
-                    {field('category', t('items.category'), { text: true, disabled: locked })}
-                    {field('hsn', t('items.hsn'), { text: true, disabled: locked })}
-                    {field('manufacturer', t('items.manufacturer'), { text: true, disabled: locked })}
+                    {field('generic', t('items.generic'), { text: true })}
+                    {field('manufacturer', t('items.manufacturer'), { text: true })}
+                    {field('hsn', t('items.hsn'), { text: true })}
+                    {field('category', t('items.category'), { text: true })}
+                    {field('pack', t('items.pack'), { text: true })}
+                    {field('unit', t('purchase.unit'), { text: true })}
+                    {field('rack', t('items.rack'), { text: true })}
                   </div>
                 )}
                 <div className="grid grid-cols-3 gap-1.5">
-                  {field('mrp', t('items.mrp'), { disabled: locked })}
-                  {field('p_rate', t('purchase.pRate'), { disabled: locked, bad: num(r.p_rate) > num(r.mrp) && num(r.mrp) > 0 })}
-                  {field('disc', t('purchase.disc'), { disabled: locked })}
-                  {field('gst', t('purchase.gst'), { disabled: locked })}
+                  {field('mrp', t('items.mrp'), { disabled: locked, price: true })}
+                  {field('disc', t('purchase.disc'), { disabled: locked, price: true })}
+                  {field('p_rate', t('purchase.pRate'), { disabled: locked, price: true, bad: num(r.p_rate) > num(r.mrp) && num(r.mrp) > 0 })}
                   {field('qty', t('sale.qty'), { disabled: locked })}
                   {field('free', t('purchase.free'), { disabled: locked })}
+                  {field('gst', t('purchase.gst'), { disabled: locked })}
                 </div>
                 <div className="grid grid-cols-4 gap-1.5">
                   {field('batch', t('stockin.batch'), { text: true })}
@@ -306,109 +421,106 @@ export default function StockIps() {
                 </div>
                 <div className="flex items-center justify-between">
                   <CardField label={t('stockin.sel')}><CardValue>{selAmount({ mrp: r.mrp, disc_percent: r.s_disc }).toFixed(2)}</CardValue></CardField>
-                  {!locked && <RowAction icon={Trash2} tone="danger" title={t('common.remove')} onClick={() => removeRow(r.key)} />}
+                  {!locked && <RowAction icon={Trash2} tone="danger" title={t('ips.removeRow')} onClick={() => removeRow(r.key)} />}
                 </div>
               </ItemCard>
             );
           })}
           {!locked && <button type="button" className="btn-secondary w-full" onClick={() => setRows((rs) => [...rs, newRow()])}><Plus size={16} /> {t('ips.addRow')}</button>}
-          <div className="flex items-center justify-between rounded-xl bg-brand-600 px-3 py-1.5 text-white shadow-sm">
-            <span className="text-13 font-semibold">{t('purchase.sumTotal')}</span>
-            <span className="text-15 font-bold tabular-nums">{money(sum)}</span>
-          </div>
         </div>
 
-        {/* Wide screens: the grid, columns grouped as on the Item, Purchase / Order and Stock In screens */}
-        <div className="mt-3 hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[1280px] border-collapse text-left text-13">
-            <thead>
+        {/* Wide screens: the grid, columns grouped as on the Item, Purchase / Order and Stock In screens; it scrolls in
+            its own box with the headings on top and # / Item Name on the left */}
+        <div className="mt-3 hidden max-h-[65vh] overflow-auto rounded-lg border border-ink-200 md:block">
+          <table className="w-full min-w-[1700px] border-separate border-spacing-0 text-left text-12">
+            <thead className="sticky top-0 z-20">
               <tr>
-                <th className={`${grp} bg-ink-50 text-ink-500`} />
-                <th colSpan={5} className={`${grp} bg-violet-50 text-violet-700`}>{t('ips.groupItem')}</th>
-                <th colSpan={7} className={`${grp} bg-sky-50 text-sky-700`}>{t('ips.groupPurchase')}</th>
+                <th className={`${grp} ${freeze0} z-30 bg-ink-50 text-ink-500`} rowSpan={2}>#</th>
+                <th className={`${grp} ${freeze1} z-30 bg-violet-50 !text-left text-violet-700`} rowSpan={2}>{t('items.name')}</th>
+                <th colSpan={7} className={`${grp} bg-violet-50 text-violet-700`}>{t('ips.groupItem')}</th>
+                <th colSpan={10} className={`${grp} bg-sky-50 text-sky-700`}>{t('ips.groupPurchase')}</th>
                 <th colSpan={5} className={`${grp} bg-emerald-50 text-emerald-700`}>{t('ips.groupStock')}</th>
-                <th className={`${grp} bg-ink-50`} />
+                <th className={`${grp} bg-ink-50`} rowSpan={2} />
               </tr>
-              <tr className="bg-brand-50 font-bold text-brand-700">
-                <th className={`${hd} w-7`}>#</th>
-                <th className={`${hd} min-w-[200px] !text-left`}>{t('items.name')}</th>
-                <th className={`${hd} w-16`}>{t('ips.packSize')}</th>
-                <th className={`${hd} w-24`}>{t('items.category')}</th>
-                <th className={`${hd} w-20`}>{t('items.hsn')}</th>
-                <th className={`${hd} w-28`}>{t('items.manufacturer')}</th>
-                <th className={`${hd} w-[4.5rem]`}>{t('items.mrp')}</th>
-                <th className={`${hd} w-[4.5rem]`}>{t('purchase.pRate')}</th>
-                <th className={`${hd} w-14`}>{t('purchase.disc')}</th>
-                <th className={`${hd} w-14`}>{t('purchase.gst')}</th>
-                <th className={`${hd} w-16`}>{t('sale.qty')}</th>
-                <th className={`${hd} w-14`}>{t('purchase.free')}</th>
-                <th className={`${hd} w-20`}>{t('purchase.total')}</th>
-                <th className={`${hd} w-24`}>{t('stockin.batch')}</th>
-                <th className={`${hd} w-[4.5rem]`}>{t('stockin.mfg')}</th>
-                <th className={`${hd} w-[4.5rem]`}>{t('stockin.exp')}</th>
-                <th className={`${hd} w-14`}>{t('stockin.sDisc')}</th>
-                <th className={`${hd} w-[4.5rem]`}>{t('stockin.sel')}</th>
-                <th className={`${hd} w-9`} />
+              <tr className="font-bold">
+                {[['items.generic', 'w-28'], ['items.manufacturer', 'w-28'], ['items.hsn', 'w-20'], ['items.category', 'w-24'], ['items.pack', 'w-16'], ['purchase.unit', 'w-14'], ['items.rack', 'w-14']]
+                  .map(([k, w]) => <th key={k} className={`${hd} ${w} bg-violet-50 text-violet-700`}>{t(k)}</th>)}
+                {[['items.mrp', 'w-[4.5rem]'], ['purchase.oldPrice', 'w-[4.5rem]'], ['purchase.disc', 'w-14'], ['purchase.pRate', 'w-[4.5rem]'], ['sale.qty', 'w-14'], ['purchase.free', 'w-14'],
+                  ['purchase.amount', 'w-20'], ['purchase.gst', 'w-14'], ['purchase.gstAmount', 'w-[4.5rem]'], ['purchase.total', 'w-20']]
+                  .map(([k, w]) => <th key={k} className={`${hd} ${w} bg-sky-50 text-sky-700`}>{t(k)}</th>)}
+                {[['stockin.batch', 'w-24'], ['stockin.mfg', 'w-[4.5rem]'], ['stockin.exp', 'w-[4.5rem]'], ['stockin.sDisc', 'w-14'], ['stockin.sel', 'w-[4.5rem]']]
+                  .map(([k, w]) => <th key={k} className={`${hd} ${w} bg-emerald-50 text-emerald-700`}>{t(k)}</th>)}
               </tr>
             </thead>
             <tbody onKeyDown={arrowMove}>
-              {rows.map((r, n) => {
-                const c = lineCalc(r);
-                const p = problems.get(r.key);
+              {view.map(({ r, used, problem, calc }, n) => {
                 const detail = !!r.item_id || locked;   // an existing item's details come from the Item List
+                const bg = problem ? 'bg-red-50' : 'bg-white';
+                const bad = (key) => (problem?.[0] === key ? GRID_BAD : '');
+                const oldPrice = r.item_id && head.supplier_id ? Number(oldPrices.data?.[r.item_id] || 0) : null;
                 return (
-                  <tr key={r.key} className={p ? 'bg-red-50/40' : 'hover:bg-brand-50/30'} title={p ? t(p, { n: n + 1 }) : undefined}>
-                    <td className={`${cell} text-center text-ink-400`}>{n + 1}</td>
-                    <td className={cell}>
+                  <tr key={r.key} className={bg} title={problem ? problemText(problem, n) : undefined}>
+                    <td className={`${cell} ${freeze0} ${bg} text-center text-ink-400`}>{n + 1}</td>
+                    <td className={`${cell} ${freeze1} ${bg}`}>
                       {locked ? <span className="block px-1.5 py-1">{r.name}</span> : (
-                        <ItemPicker inputClass={GRID_INPUT} value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />
+                        <ItemPicker inputClass={`${GRID_INPUT} ${bad('ips.lineName')} ${bad('ips.lineRepeat')}`} value={r.name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(r)} />
                       )}
-                      {!r.item_id && r.name.trim() && <span className="flex items-center gap-1 px-1.5 text-10 font-semibold text-violet-600"><Sparkles size={11} /> {t('ips.newItem')}</span>}
+                      {status(r, used)}
+                      {problem && <span className="block px-1.5 text-10 text-red-600">{problemText(problem, n)}</span>}
                     </td>
-                    <td className={cell}>{box(r, 'unit', { disabled: detail, label: t('ips.packSize'), placeholder: t('ips.packSizePh'), className: 'text-center' })}</td>
-                    <td className={cell}>{box(r, 'category', { disabled: detail, label: t('items.category') })}</td>
-                    <td className={cell}>{box(r, 'hsn', { disabled: detail, label: t('items.hsn'), className: 'uppercase' })}</td>
-                    <td className={cell}>{box(r, 'manufacturer', { disabled: detail, label: t('items.manufacturer') })}</td>
-                    <td className={cell}>{numBox(r, 'mrp', t('items.mrp'), { disabled: locked, className: `text-right ${p === 'ips.lineMrp' ? GRID_BAD : ''}` })}</td>
-                    <td className={cell}>{numBox(r, 'p_rate', t('purchase.pRate'), { disabled: locked, className: `text-right ${p === 'ips.lineOverMrp' ? GRID_BAD : ''}` })}</td>
-                    <td className={cell}>{numBox(r, 'disc', t('purchase.disc'), { disabled: locked })}</td>
-                    <td className={cell}>{numBox(r, 'gst', t('purchase.gst'), { disabled: locked, className: `text-right ${p === 'ips.lineGst' ? GRID_BAD : ''}` })}</td>
-                    <td className={cell}>{numBox(r, 'qty', t('sale.qty'), { disabled: locked, className: `text-right ${p === 'ips.lineQty' ? GRID_BAD : ''}` })}</td>
+                    <td className={cell}>{box(r, 'generic', { disabled: detail, label: t('items.generic'), maxLength: 150 })}</td>
+                    <td className={cell}>{box(r, 'manufacturer', { disabled: detail, label: t('items.manufacturer'), maxLength: 150 })}</td>
+                    <td className={cell}>{box(r, 'hsn', { disabled: detail, label: t('items.hsn'), className: 'uppercase', maxLength: 20 })}</td>
+                    <td className={cell}>{box(r, 'category', { disabled: detail, label: t('items.category'), maxLength: 100 })}</td>
+                    <td className={cell}>{box(r, 'pack', { disabled: detail, label: t('items.pack'), maxLength: 50 })}</td>
+                    <td className={cell}>{box(r, 'unit', { disabled: detail, label: t('purchase.unit'), className: 'text-center', maxLength: 30 })}</td>
+                    <td className={cell}>{box(r, 'rack', { disabled: detail, label: t('items.rack'), maxLength: 50 })}</td>
+                    <td className={cell}>{priceBox(r, 'mrp', t('items.mrp'), { disabled: locked, className: bad('ips.lineMrp') })}</td>
+                    <td className={`${cell} ${ro}`}>{oldPrice == null ? '' : money(oldPrice)}</td>
+                    <td className={cell}>{priceBox(r, 'disc', t('purchase.disc'), { disabled: locked, className: bad('ips.lineDisc') })}</td>
+                    <td className={cell}>{priceBox(r, 'p_rate', t('purchase.pRate'), { disabled: locked, className: `${bad('ips.lineRate')} ${bad('ips.lineOverMrp')}` })}</td>
+                    <td className={cell}>{numBox(r, 'qty', t('sale.qty'), { disabled: locked, className: bad('ips.lineQty') })}</td>
                     <td className={cell}>{numBox(r, 'free', t('purchase.free'), { disabled: locked })}</td>
-                    <td className={`${cell} ${ro} font-semibold text-ink-800`}>{c.total ? c.total.toFixed(2) : ''}</td>
-                    <td className={cell}>{box(r, 'batch', { label: t('stockin.batch'), className: 'uppercase' })}</td>
+                    <td className={`${cell} ${ro}`}>{used ? money(calc.amount) : ''}</td>
+                    <td className={cell}>{numBox(r, 'gst', t('purchase.gst'), { disabled: locked, className: bad('ips.lineGst') })}</td>
+                    <td className={`${cell} ${ro}`}>{used ? money(calc.gst_amount) : ''}</td>
+                    <td className={`${cell} ${ro} font-semibold text-ink-800`}>{used ? money(calc.total) : ''}</td>
+                    <td className={cell}>{box(r, 'batch', { label: t('stockin.batch'), className: `uppercase ${bad('ips.lineBatch')}`, maxLength: 50 })}</td>
                     <td className={cell}>{monthBox(r, 'mfg', t('stockin.mfg'))}</td>
                     <td className={cell}>{monthBox(r, 'exp', t('stockin.exp'))}</td>
-                    <td className={cell}>{numBox(r, 's_disc', t('stockin.sDisc'))}</td>
+                    <td className={cell}>{numBox(r, 's_disc', t('stockin.sDisc'), { className: bad('ips.lineSDisc') })}</td>
                     <td className={`${cell} ${ro}`}>{num(r.mrp) ? selAmount({ mrp: r.mrp, disc_percent: r.s_disc }).toFixed(2) : ''}</td>
-                    <td className={`${cell} text-center`}>
-                      {!locked && <RowAction icon={Trash2} tone="danger" title={t('common.remove')} onClick={() => removeRow(r.key)} />}
+                    <td className={`${cell} whitespace-nowrap text-center`}>
+                      {!locked && (
+                        <>
+                          <RowAction icon={Plus} title={t('ips.addRowBelow')} onClick={() => addRowAfter(r.key)} />
+                          <RowAction icon={Trash2} tone="danger" title={t('ips.removeRow')} onClick={() => removeRow(r.key)} />
+                        </>
+                      )}
                     </td>
                   </tr>
                 );
               })}
             </tbody>
-            <tfoot>
-              <tr className="bg-ink-50 font-semibold">
-                <td colSpan={6} className={`${cell} px-2`}>
-                  {!locked && (
-                    <button type="button" className="btn-ghost !px-2 !py-1 text-13" onClick={(e) => { setRows((rs) => [...rs, newRow()]); focusNewRow(e.currentTarget); }}>
-                      <Plus size={15} /> {t('ips.addRow')}
-                    </button>
-                  )}
-                </td>
-                <td colSpan={6} className={`${cell} px-2 text-right`}>{t('purchase.sumTotal')}</td>
-                <td className={`${cell} ${ro} bg-brand-600 font-bold !text-white`}>{money(sum)}</td>
-                <td colSpan={6} className={cell} />
-              </tr>
-            </tfoot>
           </table>
         </div>
 
-        <div className={FORM_ACTIONS}>
-          <button type="button" className="btn-secondary px-2 sm:px-4" onClick={reset} disabled={!!saving}><X size={16} /> {t('common.cancel')}</button>
-          <button type="button" className="btn-danger px-2 sm:px-4" disabled title={t('common.deleteHint')}><Trash2 size={16} /> {t('common.delete')}</button>
-          <button type="submit" className="btn-primary px-2 sm:px-4" disabled={!!saving}><Save size={16} /> {saving ? t('common.saving') : t('common.save')}</button>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-4 text-13 text-ink-600">
+            <span>{t('purchase.sumTotal')} <b className="tabular-nums text-ink-800">{money(sum)}</b></span>
+            <label className="inline-flex items-center gap-1.5">
+              <input type="checkbox" checked={roundOn} disabled={locked} onChange={(e) => setRoundOn(e.target.checked)} /> {t('sale.roundOff')}
+              <span className={`tabular-nums ${roundOff < 0 ? 'text-red-600' : ''}`}>{roundOff > 0 ? '+' : ''}{money(roundOff)}</span>
+            </label>
+            <span>{t('ips.netAmount')} <b className="tabular-nums text-brand-800">{money(sum + roundOff)}</b></span>
+            {!locked && <button type="button" className="btn-ghost !px-2 !py-1 text-13 max-md:hidden" onClick={() => setRows((rs) => [...rs, newRow()])}><Plus size={15} /> {t('ips.addRow')}</button>}
+          </div>
+          <div className="flex gap-2">
+            <button type="button" className="btn-secondary px-2 sm:px-4" onClick={reset} disabled={!!saving}><X size={16} /> {locked ? t('ips.startOver') : t('ips.clear')}</button>
+            <button type="submit" className="btn-primary px-2 sm:px-4" disabled={!!saving}>
+              <Save size={16} /> {saving ? t('common.saving') : locked ? t('ips.saveStock') : t('ips.saveAll')}
+            </button>
+          </div>
         </div>
       </form>
       <ScanBillModal open={scanOpen} onClose={() => setScanOpen(false)} onLines={fromBill} />

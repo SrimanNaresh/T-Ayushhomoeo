@@ -19,17 +19,17 @@ const table = {
 
 test('Scan Bill: bill headings are matched to Three in One columns', () => {
   const map = autoMapTable(table);
-  assert.deepEqual(map, { name: 0, category: 1, exp: 2, qty: 3, free: 4, mrp: 5, pRate: 6, disc: 7, gst: 8 });   // Rack: not on Three in One
+  assert.deepEqual(map, { name: 0, category: 1, exp: 2, qty: 3, free: 4, mrp: 5, pRate: 6, disc: 7, gst: 8, rack: 9 });
 });
 
-test('Scan Bill: a line keeps the bill Rate as P.Rate and Disc % off it; "6%+6%" is GST 12', () => {
+test('Scan Bill: a line keeps the bill Rate, MRP and Disc %; "6%+6%" is GST 12', () => {
   const [dolo, crocin, ...rest] = linesOf(table, autoMapTable(table));
   assert.equal(rest.length, 0);
   assert.equal(dolo.name, 'DOLO 650 TAB');
   assert.equal(dolo.category, 'B1234');
   assert.equal(dolo.exp, '2027-05');
   assert.deepEqual([dolo.qty, dolo.free, dolo.mrp, dolo.pRate, dolo.disc, dolo.gst], ['10', '1', '32', '24.5', '10', '12']);
-  // "20,50" read as 20.50; a Disc of 120 is more than the rate → an amount for the line: 120 / (15 × 5) is over 100 % → blank
+  // "20,50" read as 20.50; a Disc of 120 matches no rule and is over 100 % of the line's MRP → left blank
   assert.equal(crocin.name, 'CROCIN ADVANCE');
   assert.equal(crocin.mrp, '20.5');
   assert.equal(crocin.category, 'C77');
@@ -37,16 +37,19 @@ test('Scan Bill: a line keeps the bill Rate as P.Rate and Disc % off it; "6%+6%"
   assert.equal(crocin.disc, '');
 });
 
-test('Scan Bill: Disc printed as an amount becomes Disc % of P.Rate', () => {
-  const map = { name: 0, pRate: 1, qty: 2, disc: 3 };
-  assert.equal(fieldsOf(['X', '50', '10', '120'], map).disc, '24');     // 120 of a 500 line
+test('Scan Bill (All In One): Disc is a % of the MRP, or an amount checked against MRP and rate', () => {
+  const map = { name: 0, mrp: 1, pRate: 2, qty: 3, disc: 4 };
+  assert.equal(fieldsOf(['X', '100', '80', '10', '20'], map).disc, '20');     // MRP less 20 % = 80
+  assert.equal(fieldsOf(['X', '100', '80', '10', '200'], map).disc, '20');    // 1000 − 200 = 800 = 80 × 10
+  assert.equal(fieldsOf(['X', '100', '80', '10', '20.00'], { ...map, pRate: undefined }).disc, '20');
+  assert.equal(fieldsOf(['X', '', '', '', '120'], map).disc, '');            // no MRP: an amount can't be placed
 });
 
-test('Scan Bill: no rate column – Amount ÷ Qty is the (net) rate and Disc % is not applied again', () => {
+test('Scan Bill: no rate column – Amount ÷ Qty is the rate; GST % from GST Amt', () => {
   const map = { name: 0, qty: 1, amount: 2, disc: 3, gstAmt: 4 };
   const o = fieldsOf(['Y', '4', '90', '10', '10.80'], map);
   assert.equal(o.pRate, '22.5');
-  assert.equal(o.disc, '');
+  assert.equal(o.disc, '10');
   assert.equal(o.gst, '12');      // GST Amt 10.80 on an Amount of 90
   assert.equal(o.amount, undefined);
 });

@@ -5,8 +5,9 @@ import { compact } from './billScan.js';
 // The Three in One columns a bill column can fill, as tiles: [key, i18n key, width px]. Net Rate, Amount,
 // CGST / SGST, GST Amt and Total only help work out P.Rate / GST % when the bill has no such column.
 export const TARGETS = [
-  ['name', 'scan.col.name', 200], ['manufacturer', 'scan.col.manufacturer', 120], ['hsnCode', 'scan.col.hsn', 85],
-  ['category', 'scan.col.category', 100], ['pack', 'scan.col.pack', 70],
+  ['name', 'scan.col.name', 200], ['generic', 'scan.col.generic', 110], ['manufacturer', 'scan.col.manufacturer', 120],
+  ['hsnCode', 'scan.col.hsn', 85], ['category', 'scan.col.category', 100], ['pack', 'scan.col.pack', 70],
+  ['unit', 'scan.col.unit', 60], ['rack', 'scan.col.rack', 65],
   ['mrp', 'scan.col.mrp', 75], ['pRate', 'scan.col.pRate', 75], ['disc', 'scan.col.disc', 60], ['oldPrice', 'scan.col.netRate', 75],
   ['qty', 'scan.col.qty', 60], ['free', 'scan.col.free', 60], ['amount', 'scan.col.amount', 80],
   ['gst', 'scan.col.gst', 60], ['cgst', 'scan.col.cgst', 65], ['sgst', 'scan.col.sgst', 65], ['gstAmt', 'scan.col.gstAmt', 75],
@@ -31,21 +32,20 @@ const BY_LABEL = [
   ['gstAmt', (k) => /^(gst|igst|tax)(amt|amount|value)$/.test(k)],
   ['amount', (k) => /^(amt|amount|value|taxable|taxablevalue|taxableamt|grossamt|grossamount)$/.test(k)],
   ['total', (k) => /^(total|netamt|netamount|nettotal|totalamt|totalamount)$/.test(k)],
+  ['unit', (k) => /^(unit|uom|type)$/.test(k)],
+  ['generic', (k) => /^(generic|genericname|composition|content)$/.test(k)],
   ['sDisc', (k) => /^(sdisc|salesdisc|saledisc|sellingdisc)$/.test(k)],
   ['sel', (k) => /^(selamount|sellingprice|saleprice|salerate|sp|srate)$/.test(k)],
   ['exp', (k) => /^(exp|expy|expiry|expire|expires|expd|ed)(date|dt|on|mmyy|month)?$/.test(k) || k === 'expirydt'],
   ['mfg', (k) => /^(mfg|mfd|mf|md|mfgd|manufacturing|manufactured|manuf)(date|dt|on|mmyy|month)$/.test(k) || /^(mfd|md)$/.test(k)],
 ];
 const KEYS = new Set(TARGETS.map(([k]) => k));
-// The reader's own column names (billScan.js) that differ from ours
-const FIELD_ALIAS = { rack: null, generic: null, unit: null };
 
 /** The tiles placed already: a column the reader named, or whose heading says what it is */
 function autoMap(heads) {
   const map = {};
   heads.forEach((h, i) => {
-    const field = h.field in FIELD_ALIAS ? FIELD_ALIAS[h.field] : h.field;
-    const key = KEYS.has(field) ? field : BY_LABEL.find(([k, test]) => KEYS.has(k) && test(headKey(h.label)))?.[0];
+    const key = KEYS.has(h.field) ? h.field : BY_LABEL.find(([k, test]) => KEYS.has(k) && test(headKey(h.label)))?.[0];
     if (key && map[key] == null) map[key] = i;
   });
   return map;
@@ -96,7 +96,7 @@ function valueFor(key, text) {
   if (NUMERIC.has(key)) return numIn(s);
   if (key === 'hsnCode') return s.replace(/[oO]/g, '0').replace(/\D/g, '').slice(0, 20);
   if (key === 'category' || key === 'batch') return s.replace(/ /g, '').toUpperCase().slice(0, 50);
-  return s.toUpperCase().slice(0, key === 'name' || key === 'manufacturer' ? 200 : 50);
+  return s.toUpperCase().slice(0, key === 'name' || key === 'manufacturer' || key === 'generic' ? 200 : 50);
 }
 // "9%+9%" in one tax cell → [cgst, sgst], else null
 const TAX_PAIR = /^(\d+(?:\.\d+)?)\s*%?\s*[-+]*\+[-+]*\s*(\d+(?:\.\d+)?)\s*%?$/;
@@ -105,14 +105,44 @@ const taxPair = (text) => {
   return m ? [Number(m[1]), Number(m[2])] : null;
 };
 
+// The bill's Disc as a % of the MRP (as in All In One). Bills print it as a % ("35.00" with MRP 185.00 and
+// rate 120.25) or as a rupee amount; the line's MRP, P.Rate and Qty tell which:
+//  - MRP less Disc % gives the rate         → a %, kept
+//  - MRP less Disc gives the rate           → an amount per unit, as a % of the MRP
+//  - MRP × Qty less Disc gives rate × Qty   → an amount for the line, as a % of it
+// Without a rate to check, up to 100 is a %, more is an amount (per unit below the MRP, else for the line).
+// A value that still is not 0–100 % is left blank, not saved wrong.
+function discPercent(text, o) {
+  const s = String(text || '');
+  const v0 = numIn(s);
+  if (v0 === '') return '';
+  const v = Number(v0);
+  const mrp = Number(o.mrp) || 0;
+  const rate = Number(o.pRate) || 0;
+  const qty = Number(o.qty) || 0;
+  const near = (a, b) => Math.abs(a - b) <= Math.max(0.05, Math.abs(b) * 0.01);
+  const pct = (x) => (x >= 0 && x <= 100 ? String(Math.round(x * 100) / 100) : '');
+  if (/%/.test(s)) return pct(v);
+  if (mrp > 0 && rate > 0) {
+    if (near(mrp * (1 - v / 100), rate)) return pct(v);
+    if (near(mrp - v, rate)) return pct((v / mrp) * 100);
+    if (qty > 0 && near(mrp * qty - v, rate * qty)) return pct((v / (mrp * qty)) * 100);
+  }
+  if (v <= 100) return pct(v);
+  if (!mrp) return '';
+  if (v < mrp) return pct((v / mrp) * 100);
+  return qty > 0 ? pct((v / (mrp * qty)) * 100) : '';
+}
+
 /**
- * One bill line through the column matches → a scanned line. Disc % is taken off P.Rate (this app's order):
- * a value with % or up to 100 is a %, a larger one an amount (per unit below the rate, else for the line).
- * With no rate column the rate is Amount ÷ Qty (or Net Rate) – already after the discount, so Disc % is 0.
+ * One bill line through the column matches → a scanned line (All In One's rules): Disc % of the MRP; with no
+ * rate column the P.Rate is Amount ÷ Qty or the Net Rate column; GST % from CGST + SGST, GST Amt or Total.
+ * Three in One then keeps P.Rate = MRP less Disc % in step (shared/purchase.js priced).
  */
 export function fieldsOf(cells, map) {
   const o = {};
   for (const [key] of TARGETS) if (map[key] != null) o[key] = valueFor(key, cells[map[key]]);
+  if (o.disc != null) o.disc = discPercent(cells[map.disc], o);
   const r2 = (n) => String(Math.round(n * 100) / 100);
   const n = (k) => Number(o[k]) || 0;
   for (const k of ['gst', 'cgst', 'sgst']) {
@@ -122,19 +152,9 @@ export function fieldsOf(cells, map) {
     if (k === 'cgst' || map.cgst == null) o.cgst = r2(pair[0]);
     if (k === 'sgst' || map.sgst == null) o.sgst = r2(pair[1]);
   }
-  let netRate = false;
   if (!(n('pRate') > 0)) {
     const net = n('amount') > 0 && n('qty') > 0 ? n('amount') / n('qty') : n('oldPrice');
-    if (net > 0) { o.pRate = r2(net); netRate = true; }
-  }
-  if (netRate) o.disc = '';
-  else if (map.disc != null && o.disc !== '') {
-    const v = n('disc');
-    const pct = (x) => (x >= 0 && x <= 100 ? r2(x) : '');
-    if (/%/.test(String(cells[map.disc])) || v <= 100) o.disc = pct(v);
-    else if (n('pRate') > 0 && v < n('pRate')) o.disc = pct((v / n('pRate')) * 100);
-    else if (n('pRate') > 0 && n('qty') > 0) o.disc = pct((v / (n('pRate') * n('qty'))) * 100);
-    else o.disc = '';
+    if (net > 0) o.pRate = r2(net);
   }
   if (!o.gst) {
     const amt = n('amount') || n('qty') * n('oldPrice');

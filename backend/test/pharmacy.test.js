@@ -1,13 +1,26 @@
 // Pharmacy formulas shared by the screens and the server: Purchase / Order, Stock In and Sales.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calcLine, splitGst } from '../../shared/purchase.js';
+import { calcLine, discOf, pRateOf, priced, roundOffOf as poRoundOff, splitGst } from '../../shared/purchase.js';
 import { packSize, selAmount, unitPrice } from '../../shared/stockin.js';
 import { lineAmount, lineCost, packsOf, perSaleUnit, roundOffOf, saleTotals } from '../../shared/sale.js';
 
-test('Purchase line: Rate = P.Rate less Disc %, free units not charged', () => {
-  const c = calcLine({ p_rate: 100, disc_percent: 10, qty: 5, free_qty: 1, cgst_percent: 6, sgst_percent: 6 });
+test('Purchase line (All In One): Amount = Qty x P.Rate (Disc % already in it), free units not charged', () => {
+  const c = calcLine({ p_rate: 90, disc_percent: 10, qty: 5, free_qty: 1, cgst_percent: 6, sgst_percent: 6 });
   assert.deepEqual(c, { rate: 90, amount: 450, gst_percent: 12, gst_amount: 54, total: 504 });
+});
+
+test('Purchase: P.Rate = MRP less Disc %, and typing one works out the other', () => {
+  assert.equal(pRateOf(140, 40), 84);
+  assert.equal(discOf(140, 84), 40);
+  assert.equal(discOf(140, 150), '');                       // above the MRP: no discount to show
+  assert.equal(discOf(0, 10), '');
+  assert.deepEqual(priced({ mrp: '140', disc: '', p_rate: '' }, 'disc', '40'), { disc: '40', p_rate: '84' });
+  assert.deepEqual(priced({ mrp: '140', disc: '', p_rate: '' }, 'p_rate', '105'), { p_rate: '105', disc: '25' });
+  assert.deepEqual(priced({ mrp: '', disc: '10', p_rate: '' }, 'mrp', '200'), { mrp: '200', p_rate: '180' });
+  assert.deepEqual(priced({ mrp: '', disc: '', p_rate: '50' }, 'mrp', '200'), { mrp: '200' });   // keeps a typed rate
+  assert.deepEqual(priced({ mrp: '200', disc_percent: '', p_rate: '' }, 'disc_percent', '5', { discKey: 'disc_percent' }), { disc_percent: '5', p_rate: '190' });
+  assert.equal(poRoundOff(1234.4), -0.4);
 });
 
 test('GST % splits evenly into CGST % and SGST %', () => {

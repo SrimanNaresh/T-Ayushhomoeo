@@ -934,6 +934,10 @@ CREATE TABLE dbo.purchase_orders (
   CONSTRAINT uq_po_clinic_no UNIQUE (clinic_id, po_no)
 );
 GO
+-- Pharmacy → Purchase / Order: Round Off (what took the Sum of Total to the nearest rupee; total_amount is after it)
+IF COL_LENGTH(N'dbo.purchase_orders', N'round_off') IS NULL
+  ALTER TABLE dbo.purchase_orders ADD round_off DECIMAL(10,2) NOT NULL CONSTRAINT df_po_roundoff DEFAULT 0;
+GO
 -- One row per item on the order. Item details are copied in, so the order keeps them if the item changes later.
 -- rate = mrp - mrp × disc_percent / 100; amount = qty × rate; gst_amount = amount / 100 × (cgst + sgst);
 -- total = amount + gst_amount

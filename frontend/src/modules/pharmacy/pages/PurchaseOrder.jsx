@@ -15,7 +15,7 @@ import ItemPicker from '../../../components/ItemPicker.jsx';
 import ItemFormModal from './ItemFormModal.jsx';
 import ItemBulkPicker from '../../../components/ItemBulkPicker.jsx';
 import VendorPicker from '../../../components/VendorPicker.jsx';
-import { calcLine, orderTotal, splitGst } from '../../../../../shared/purchase.js';
+import { calcLine, discOf, orderTotal, priced, roundOffOf, splitGst } from '../../../../../shared/purchase.js';
 import { arrowMove, focusNewRow } from '../../../lib/tableKeys.js';
 
 const newLine = () => ({
@@ -23,12 +23,32 @@ const newLine = () => ({
   generic_name: '', hsn_code: '', manufacturer: '', category: '', pack: '', unit: '',
   mrp: '', p_rate: '', free_qty: '', disc_percent: '', qty: '', gst: undefined, cgst_percent: '', sgst_percent: '',
 });
-const fromItem = (i) => ({
-  item_id: i.id, item_name: i.name, generic_name: i.generic_name || '', hsn_code: i.hsn_code || '',
-  manufacturer: i.manufacturer || '', category: i.category || '', pack: i.pack || '', unit: i.unit || '',
-  mrp: Number(i.mrp) || '', p_rate: Number(i.purchase_rate) || '', gst: undefined,
-  cgst_percent: Number(i.cgst_percent) || '', sgst_percent: Number(i.sgst_percent) || '',
-});
+const fromItem = (i) => {
+  const mrp = Number(i.mrp) || '';
+  const pRate = Number(i.purchase_rate) || '';
+  return {
+    item_id: i.id, item_name: i.name, generic_name: i.generic_name || '', hsn_code: i.hsn_code || '',
+    manufacturer: i.manufacturer || '', category: i.category || '', pack: i.pack || '', unit: i.unit || '',
+    mrp, p_rate: pRate, disc_percent: discOf(mrp, pRate) || '', qty: 1, gst: undefined,
+    cgst_percent: Number(i.cgst_percent) || '', sgst_percent: Number(i.sgst_percent) || '',
+  };
+};
+const MAX_GST = 28;
+// A line's problem (i18n key + params; the server checks the same), or null. dupOf: the earlier line with the same
+// entry (Item Name + HSN + Category) – as in All In One, the same item twice is a duplicate.
+function lineProblem(l, dupOf) {
+  if (!l.item_id) return null;
+  if (dupOf != null) return ['purchase.lineDup', { m: dupOf + 1 }];
+  if (!(Number(l.qty) > 0)) return ['purchase.lineQty'];
+  if (!(Number(l.mrp) > 0)) return ['purchase.lineMrp'];
+  if (!(Number(l.p_rate) > 0)) return ['purchase.lineRate'];
+  if (Number(l.p_rate) > Number(l.mrp)) return ['purchase.lineOverMrp', { mrp: Number(l.mrp).toFixed(2) }];
+  if (Number(l.free_qty || 0) < 0) return ['purchase.lineFree'];
+  if (Number(l.disc_percent || 0) > 100) return ['purchase.lineDisc'];
+  if (Number(l.cgst_percent || 0) + Number(l.sgst_percent || 0) > MAX_GST) return ['purchase.lineGst'];
+  return null;
+}
+const entryOf = (l) => (l.item_id ? `${String(l.item_name).toUpperCase().replace(/[^A-Z0-9]/g, '')}|${String(l.hsn_code || '').replace(/\D/g, '')}|${String(l.category || '').toUpperCase().replace(/[^A-Z0-9]/g, '')}` : '');
 const overMrp = (l) => Number(l.mrp) > 0 && Number(l.p_rate) > Number(l.mrp);
 const two = (n) => Number(n || 0).toFixed(2);
 
@@ -63,6 +83,7 @@ export default function PurchaseForm({ params }) {
   const [saving, setSaving] = useState(false);
   const [showDetails, setShowDetails] = useState(false); // Details box: hidden until the arrow beside Vendor Name is clicked
   const [bulkOpen, setBulkOpen] = useState(false);   // "Bulk add" panel: tick many items at once
+  const [roundOn, setRoundOn] = useState(true);       // Round Off the Sum of Total to the nearest rupee
   const [showMore, setShowMore] = useState(false);   // Generic Name, Manufacturer, HSN in place of the GST columns
   const existing = useAsync(() => (id ? api(`/pharmacy/purchase-orders/${id}`) : Promise.resolve(null)), [id]);
   const vendors = useAsync(() => api('/pharmacy/vendors', { query: { status: 'active' } }), []);
@@ -95,6 +116,7 @@ export default function PurchaseForm({ params }) {
     const po = existing.data;
     if (!po) return;
     setHead({ supplier_id: String(po.supplier_id), po_date: String(po.po_date).slice(0, 10), details: po.details || '' });
+    setRoundOn(Number(po.round_off) !== 0);
     setLines(po.lines.map((l) => ({ ...newLine(), ...l, key: String(l.id), mrp: Number(l.mrp), disc_percent: Number(l.disc_percent) || '',
       p_rate: Number(l.p_rate ?? l.mrp) || '', free_qty: Number(l.free_qty) || '',
       qty: Number(l.qty), cgst_percent: Number(l.cgst_percent) || '', sgst_percent: Number(l.sgst_percent) || '' })));
@@ -113,7 +135,19 @@ export default function PurchaseForm({ params }) {
   // + on a row adds a new empty line right under it
   const addLineAfter = (key) => setLines((ls) => ls.flatMap((l) => (l.key === key ? [l, newLine()] : [l])));
   const removeLine = (key) => setLines((ls) => (ls.length > 1 ? ls.filter((l) => l.key !== key) : [newLine()]));
-  const pickItem = (l) => ({ item, medicine_name: typed }) => setLine(l.key, item ? fromItem(item) : { ...newLine(), key: l.key, item_name: typed });
+  const pickItem = (l) => ({ item, medicine_name: typed }) => {
+    if (!item) { setLine(l.key, { ...newLine(), key: l.key, item_name: typed }); return; }
+    const line = fromItem(item);
+    setLine(l.key, line);
+    if (!head.supplier_id) return;
+    api('/pharmacy/purchase-orders/old-prices', { query: { supplier_id: head.supplier_id, item_ids: item.id, except: id || '' } })
+      .then((r) => {
+        const last = Number(r?.[item.id] || 0);
+        if (last > 0) setLines((ls) => ls.map((x) => (x.key === l.key && x.item_id === item.id ? { ...x, ...priced(x, 'p_rate', String(last), { discKey: 'disc_percent' }) } : x)));
+      })
+      .catch(() => {});
+  };
+  const setPrice = (l, key, value) => setLine(l.key, priced(l, key, value, { discKey: 'disc_percent' }));
 
   // "+ Add new item" / edit (pencil) in an item box open the item popup; `key` is the line it was opened from
   const [itemForm, setItemForm] = useState(null);   // null | { name, key } (add) | { id, key } (edit)
@@ -136,13 +170,23 @@ export default function PurchaseForm({ params }) {
     setItemForm(null);
   }
 
+  // each line's problem (null when fine)
+  const seen = new Map();
+  const problems = lines.map((l, n) => {
+    const k = entryOf(l);
+    const dup = k && seen.has(k) ? seen.get(k) : null;
+    if (k && !seen.has(k)) seen.set(k, n);
+    return lineProblem(l, dup);
+  });
+  const problemText = (n) => (problems[n] ? `${l10nLine(n)}: ${t(problems[n][0], problems[n][1])}` : '');
+  function l10nLine(n) { return t('ips.lineN', { n: n + 1 }); }
+
   function validate() {
     if (!head.supplier_id) return t('purchase.chooseVendor');
     if (!head.po_date) return t('common.isRequired', { field: t('purchase.date') });
     if (!lines.some((l) => l.item_id)) return t('common.isRequired', { field: t('items.name') });
-    const bad = lines.find((l) => l.item_id && overMrp(l));
-    if (bad) return t('purchase.rateOverMrp', { name: bad.item_name });
-    return null;
+    const bad = problems.findIndex(Boolean);
+    return bad >= 0 ? problemText(bad) : null;
   }
 
   async function submit(e) {
@@ -152,6 +196,7 @@ export default function PurchaseForm({ params }) {
     setSaving(true);
     const body = {
       ...head,
+      round_off: roundOn,
       lines: lines.filter((l) => l.item_id).map(({ item_id, mrp, p_rate, free_qty, disc_percent, qty, cgst_percent, sgst_percent }) =>
         ({ item_id, mrp, p_rate, free_qty, disc_percent, qty, cgst_percent, sgst_percent })),
     };
@@ -179,13 +224,21 @@ export default function PurchaseForm({ params }) {
     }
   }
 
-  const reset = () => { setHead(emptyHead()); setLines([newLine()]); setNewVendor(null); };
+  const reset = () => { setHead(emptyHead()); setLines([newLine()]); setNewVendor(null); setRoundOn(true); };
 
   if (id && existing.loading) return <div className="card"><Spinner /></div>;
   if (existing.error) return <div className="card"><ErrorBox error={existing.error} onRetry={existing.reload} /></div>;
   const num = { type: 'number', min: '0', step: '0.01', inputMode: 'decimal' };
   const box = `${GRID_INPUT} text-right`;
   const picked = lines.filter((l) => l.item_id);
+  const sumTotal = orderTotal(picked);
+  const roundOff = roundOn ? roundOffOf(sumTotal) : 0;
+  const roundBox = (
+    <label className="inline-flex cursor-pointer items-center gap-1.5" title={t('purchase.roundOffHint')}>
+      <input type="checkbox" checked={roundOn} onChange={(e) => setRoundOn(e.target.checked)} /> {t('sale.roundOff')}
+    </label>
+  );
+  const roundText = roundOff > 0 ? `+${two(roundOff)}` : two(roundOff);
   const oldOf = (l) => (l.item_id && head.supplier_id ? Number(oldPrices.data?.[l.item_id] || 0) : null);
   const arrow = (open) => (open ? <ChevronLeft size={15} /> : <ChevronRight size={15} />);
 
@@ -268,20 +321,20 @@ export default function PurchaseForm({ params }) {
             const numBox = (label, key, extra = {}) => (
               <CardField label={label}>
                 <input {...num} className={`${cardBox} no-spin ${extra.bad ? cardBad : ''}`} value={extra.value ?? l[key]} disabled={!l.item_id}
-                  onChange={(e) => setLine(l.key, extra.onChange ? extra.onChange(e.target.value) : { [key]: e.target.value })} />
+                  onChange={(e) => (extra.price ? setPrice(l, key, e.target.value) : setLine(l.key, extra.onChange ? extra.onChange(e.target.value) : { [key]: e.target.value }))} />
               </CardField>
             );
             return (
-              <ItemCard key={l.key} no={n + 1} bad={bad}
+              <ItemCard key={l.key} no={n + 1} bad={!!problems[n]}
                 title={<ItemPicker browse value={l.item_name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(l)} {...itemBoxProps(l)} />}
                 sub={l.item_id ? [l.category, l.pack, l.unit].filter(Boolean).join(' · ') : ''}>
                 {l.item_id && (
                   <>
                     <div className="grid grid-cols-5 gap-1.5">
-                      {numBox(t('items.mrp'), 'mrp')}
+                      {numBox(t('items.mrp'), 'mrp', { price: true })}
                       <CardField label={t('purchase.oldPrice')}><CardValue className="!bg-amber-50 text-amber-800">{old == null ? '-' : two(old)}</CardValue></CardField>
-                      {numBox(t('purchase.disc'), 'disc_percent')}
-                      {numBox(t('purchase.pRate'), 'p_rate', { bad })}
+                      {numBox(t('purchase.disc'), 'disc_percent', { price: true })}
+                      {numBox(t('purchase.pRate'), 'p_rate', { bad, price: true })}
                       {numBox(t('items.quantity'), 'qty')}
                     </div>
                     <div className="grid grid-cols-5 gap-1.5">
@@ -291,7 +344,7 @@ export default function PurchaseForm({ params }) {
                       <CardField label={t('purchase.gstAmount')}><CardValue>{two(c.gst_amount)}</CardValue></CardField>
                       <CardField label={t('purchase.total')}><CardValue className="!bg-brand-50 font-bold text-brand-800">{two(c.total)}</CardValue></CardField>
                     </div>
-                    {bad && <p className="rounded-md bg-red-50 px-2 py-1 text-11 text-red-600">{t('purchase.rateOverMrp', { name: l.item_name })}</p>}
+                    {problems[n] && <p className="rounded-md bg-red-50 px-2 py-1 text-11 text-red-600">{problemText(n)}</p>}
                   </>
                 )}
                 <div className="flex justify-end gap-1.5">
@@ -301,9 +354,15 @@ export default function PurchaseForm({ params }) {
             );
           })}
           <button type="button" className="btn-secondary w-full border-dashed" onClick={() => setLines((ls) => [...ls, newLine()])}><Plus size={16} /> {t('purchase.addLine')}</button>
-          <div className="flex items-center justify-between rounded-xl bg-brand-600 px-3 py-1.5 text-white shadow-sm">
-            <span className="text-13 font-semibold">{t('purchase.sumTotal')}</span>
-            <span className="text-15 font-bold tabular-nums">{money(orderTotal(picked))}</span>
+          <div className="overflow-hidden rounded-xl border border-ink-200 bg-white shadow-sm">
+            <div className="flex items-center justify-between px-3 py-1.5 text-13 text-ink-600">
+              <span>{t('purchase.sumTotal')} <b className="tabular-nums text-ink-900">{money(sumTotal)}</b></span>
+              <span className="inline-flex items-center gap-2">{roundBox} <b className="tabular-nums">{roundText}</b></span>
+            </div>
+            <div className="flex items-center justify-between bg-brand-600 px-3 py-1.5 text-white">
+              <span className="text-13 font-semibold">{t('ips.netAmount')}</span>
+              <span className="text-15 font-bold tabular-nums">{money(sumTotal + roundOff)}</span>
+            </div>
           </div>
         </div>
 
@@ -356,23 +415,25 @@ export default function PurchaseForm({ params }) {
               {lines.map((l, n) => {
                 const c = calcLine(l);
                 const old = oldOf(l);
+                const p = problems[n];
                 return (
-                  <tr key={l.key} className="hover:bg-brand-50/30">
+                  <tr key={l.key} className={p ? 'bg-red-50/60' : 'hover:bg-brand-50/30'} title={p ? problemText(n) : undefined}>
                     <td className={`${cell} text-center text-ink-400`}>{n + 1}</td>
                     <td className={cell}>
                       <ItemPicker browse inputClass={GRID_INPUT} value={l.item_name} ariaLabel={t('items.name')} placeholder={t('purchase.itemHint')} onPick={pickItem(l)} {...itemBoxProps(l)} />
+                      {p && <span className="block px-1.5 text-10 text-red-600">{t(p[0], p[1])}</span>}
                     </td>
                     <td className={`${cell} text-12 text-ink-500`}>{l.category || '-'}</td>
                     <td className={`${cell} text-12 text-ink-500`}>{l.pack || '-'}</td>
                     <td className={`${cell} text-12 text-ink-500`}>{l.unit || '-'}</td>
-                    <td className={cell}><input {...num} className={box} aria-label={t('items.mrp')} value={l.mrp} onChange={(e) => setLine(l.key, { mrp: e.target.value })} /></td>
+                    <td className={cell}><input {...num} className={`${box} ${p?.[0] === 'purchase.lineMrp' ? GRID_BAD : ''}`} aria-label={t('items.mrp')} value={l.mrp} onChange={(e) => setPrice(l, 'mrp', e.target.value)} /></td>
                     <td className={`${cell} ${ro} bg-amber-50/40`}>{old == null ? '-' : two(old)}</td>
                     <td className={cell} title={overMrp(l) ? t('purchase.rateOverMrp', { name: l.item_name }) : undefined}>
-                      <input {...num} className={`${box} ${overMrp(l) ? GRID_BAD : ''}`} aria-label={t('purchase.pRate')} value={l.p_rate} onChange={(e) => setLine(l.key, { p_rate: e.target.value })} />
+                      <input {...num} className={`${box} ${overMrp(l) || p?.[0] === 'purchase.lineRate' ? GRID_BAD : ''}`} aria-label={t('purchase.pRate')} value={l.p_rate} onChange={(e) => setPrice(l, 'p_rate', e.target.value)} />
                     </td>
                     <td className={cell}><input {...num} className={box} aria-label={t('purchase.free')} value={l.free_qty} onChange={(e) => setLine(l.key, { free_qty: e.target.value })} /></td>
-                    <td className={cell}><input {...num} max="100" className={box} aria-label={t('purchase.disc')} value={l.disc_percent} onChange={(e) => setLine(l.key, { disc_percent: e.target.value })} /></td>
-                    <td className={cell}><input {...num} className={box} aria-label={t('items.quantity')} value={l.qty} onChange={(e) => setLine(l.key, { qty: e.target.value })} /></td>
+                    <td className={cell}><input {...num} max="100" className={box} aria-label={t('purchase.disc')} value={l.disc_percent} onChange={(e) => setPrice(l, 'disc_percent', e.target.value)} /></td>
+                    <td className={cell}><input {...num} className={`${box} ${p?.[0] === 'purchase.lineQty' ? GRID_BAD : ''}`} aria-label={t('items.quantity')} value={l.qty} onChange={(e) => setLine(l.key, { qty: e.target.value })} /></td>
                     <td className={`${cell} ${ro}`}>{two(c.amount)}</td>
                     {showMore ? (
                       <>
@@ -411,8 +472,18 @@ export default function PurchaseForm({ params }) {
             <tfoot>
               <tr className="bg-ink-50 font-semibold">
                 <td colSpan={showMore ? 15 : 16} className={`${cell} px-2 text-right`}>{t('purchase.sumTotal')}</td>
-                <td className={`${cell} ${ro} bg-brand-600 font-bold !text-white`}>{money(orderTotal(picked))}</td>
+                <td className={`${cell} ${ro} text-ink-800`}>{money(sumTotal)}</td>
                 <td className={cell} />
+              </tr>
+              <tr className="bg-ink-50">
+                <td colSpan={showMore ? 15 : 16} className={`${cell} px-2 text-right font-normal text-ink-600`}>{roundBox}</td>
+                <td className={`${cell} ${ro} ${roundOff < 0 ? 'text-red-600' : ''}`}>{roundText}</td>
+                <td className={cell} />
+              </tr>
+              <tr className="font-semibold">
+                <td colSpan={showMore ? 15 : 16} className={`${cell} bg-brand-600 px-2 text-right font-bold text-white`}>{t('ips.netAmount')}</td>
+                <td className={`${cell} ${ro} bg-brand-600 font-bold !text-white`}>{money(sumTotal + roundOff)}</td>
+                <td className={`${cell} bg-brand-600`} />
               </tr>
             </tfoot>
           </table>
