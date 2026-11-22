@@ -59,6 +59,16 @@ const sameItem = (i, r) => {
   const differs = (a, b) => a !== '' && b !== '' && a !== b;
   return compact(i.name) === compact(r.name) && !differs(digits(i.hsn_code), digits(r.hsn)) && !differs(code(i.category), code(r.category));
 };
+// The Stock In No that already has this vendor's Bill No, or null (also null when the check itself fails:
+// the server refuses a repeated Bill No when the Stock In is saved)
+async function checkBillNo(supplierId, billNo) {
+  try {
+    const res = await api('/pharmacy/stock-ins/bill-no', { query: { supplier_id: supplierId, bill_no: billNo.trim().toUpperCase() } });
+    return res.si_no || null;
+  } catch {
+    return null;
+  }
+}
 async function findItem(r) {
   try {
     const res = await api('/pharmacy/item-master', { query: { q: r.name.trim(), limit: 20 } });
@@ -129,12 +139,25 @@ export default function StockIps() {
   const [head, setHead] = useState(EMPTY_HEAD);
   const [rows, setRows] = useState([newRow()]);
   const [roundOn, setRoundOn] = useState(true);
-  const [billDisc, setBillDisc] = useState('');     // Bill Disc %: the supplier bill's discount on the whole bill
+  const [allDisc, setAllDisc] = useState('');       // Disc % on all lines: fills every line's Disc % (new rows too)
   const [showDetails, setShowDetails] = useState(false);
   const [newVendor, setNewVendor] = useState(null);
   const [added, setAdded] = useState([]);            // vendors added here, until the list is loaded again
   const [saving, setSaving] = useState('');            // the step being saved ('' = idle)
   const [savedOrder, setSavedOrder] = useState(null);  // an order saved whose Stock In failed
+  // The vendor's Bill No already on a saved Stock In (that Stock In No), checked as it is typed
+  const [billUsed, setBillUsed] = useState(null);
+  const billUsedText = billUsed ? t('ips.billNoUsed', { no: head.bill_no.trim().toUpperCase(), si: billUsed }) : '';
+  useEffect(() => {
+    setBillUsed(null);
+    if (!head.supplier_id || !head.bill_no.trim() || savedOrder) return undefined;
+    let live = true;
+    const timer = setTimeout(async () => {
+      const used = await checkBillNo(head.supplier_id, head.bill_no);
+      if (live) setBillUsed(used);
+    }, 400);
+    return () => { live = false; clearTimeout(timer); };
+  }, [head.supplier_id, head.bill_no, savedOrder]);
   const [scanOpen, setScanOpen] = useState(false);
   const vendors = useAsync(() => api('/pharmacy/vendors', { query: { status: 'active' } }), []);
   const vendorRows = [...added.filter((a) => !(vendors.data?.rows || []).some((v) => v.id === a.id)), ...(vendors.data?.rows || [])]
@@ -142,8 +165,11 @@ export default function StockIps() {
   const locked = !!savedOrder;   // the order is saved: only the Stock In columns can still change
 
   const setRow = (key, patch) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  const removeRow = (key) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow()]));
-  const addRowAfter = (key) => setRows((rs) => rs.flatMap((r) => (r.key === key ? [r, newRow()] : [r])));
+  const fresh = () => ({ ...newRow(), disc: allDisc });
+  const removeRow = (key) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [fresh()]));
+  const addRowAfter = (key) => setRows((rs) => rs.flatMap((r) => (r.key === key ? [r, fresh()] : [r])));
+  // Disc % on all lines: each line's P.Rate becomes MRP less that Disc %, so its Total Amount and the Sum of Total drop
+  const discAll = (value) => { setAllDisc(value); setRows((rs) => rs.map((r) => ({ ...r, ...priced(r, 'disc', value) }))); };
   const setPrice = (r, key, value) => setRow(r.key, priced(r, key, value));
   const chooseVendor = (v) => setHead((h) => ({ ...h, supplier_id: String(v.id), details: vendorDetails(v, t) }));
 
@@ -176,9 +202,13 @@ export default function StockIps() {
   // Scan Bill: the bill's lines fill the table after the rows already typed; repeats are left out. Lines whose
   // item is in the Item List are linked to it. The bill's vendor is picked when one in the Vendor List has very
   // nearly that name (else it is offered as a new vendor); its date fills Date.
+  // The popup stays open for the bill's next page; the supplier comes with the first page's lines only.
   async function fromBill(lines, { supplier } = {}) {
-    setScanOpen(false);
-    const have = new Set(rows.filter((r) => !isBlank(r)).map(entryKey));
+    // A repeat is the same line read twice: same Item Name, HSN, Batch and figures. The same name, HSN and
+    // batch with other figures is another line of the bill (a name read without its potency, "30C" / "200C"):
+    // it is kept – marked as a repeat on the table to correct – rather than lost.
+    const lineKey = (r) => (entryKey(r) ? `${entryKey(r)}|${num(r.mrp)}|${num(r.p_rate)}|${num(r.qty)}` : '');
+    const have = new Set(rows.filter((r) => !isBlank(r)).map(lineKey));
     const add = [];
     let repeats = 0;
     for (const b of lines) {
@@ -188,17 +218,16 @@ export default function StockIps() {
         qty: numStr(b.qty), free: numStr(b.free), gst: numStr(b.gst),
         batch: b.batch || b.category, mfg: monthToMMYY(b.mfg), exp: monthToMMYY(b.exp), s_disc: numStr(b.sDisc),
       };
-      // P.Rate = MRP less Disc % (or the Disc % from the bill's rate); S.Disc % from a selling price
-      if (r.disc !== '') r = { ...r, ...priced(r, 'disc', r.disc) };
-      else if (num(r.p_rate) > 0) r = { ...r, ...priced(r, 'p_rate', r.p_rate) };
+      // P.Rate and Disc % stay exactly as read from the bill – neither is worked out from the other or from
+      // the MRP. S.Disc % from a selling price.
       if (r.s_disc === '' && num(b.sel) > 0 && num(r.mrp) >= num(b.sel)) r.s_disc = String(r2((1 - num(b.sel) / num(r.mrp)) * 100));
-      const k = entryKey(r);
+      const k = lineKey(r);
       if (k && have.has(k)) { repeats += 1; continue; }
       have.add(k);
       add.push(r);
     }
     const linked = await Promise.all(add.map(async (r) => {
-      const i = await findItem(r);
+      const i = compact(r.name) ? await findItem(r) : null;   // (a bill line whose name couldn't be read comes unnamed)
       return i ? { ...r, ...withItem(r, i, true) } : r;
     }));
     setRows((rs) => [...rs.filter((r) => !isBlank(r)), ...linked, ...(linked.length ? [] : [newRow()])]);
@@ -237,22 +266,22 @@ export default function StockIps() {
   const usedRows = view.filter((v) => v.used);
   const newCount = usedRows.filter((v) => !v.r.item_id).length;
   const sum = r2(usedRows.reduce((s, v) => s + v.calc.total, 0));
-  const net = orderNet(sum, billDisc, roundOn);
+  const net = orderNet(sum, 0, roundOn);
   const roundOff = net.round_off;
-  const billDiscBad = Number(billDisc) < 0 || Number(billDisc) > 100;
+  const allDiscBad = Number(allDisc) < 0 || Number(allDisc) > 100;
   const problemText = (p, n) => (p ? `${t('ips.lineN', { n: n + 1 })}: ${t(p[0], p[1])}` : '');
 
   function validate() {
     if (!head.supplier_id) return t('purchase.chooseVendor');
     if (!head.date) return t('common.isRequired', { field: t('purchase.date') });
     if (!head.bill_no.trim()) return t('ips.billNoRequired');
-    if (billDiscBad) return t('ips.billDiscRange');
+    if (billUsed && !savedOrder) return billUsedText;
     if (!usedRows.length) return t('ips.empty');
     const bad = view.findIndex((v) => v.problem);
     return bad >= 0 ? problemText(view[bad].problem, bad) : null;
   }
 
-  const reset = () => { setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); setRoundOn(true); setBillDisc(''); setNewVendor(null); setShowDetails(false); };
+  const reset = () => { setHead(EMPTY_HEAD()); setRows([newRow()]); setSavedOrder(null); setRoundOn(true); setAllDisc(''); setNewVendor(null); setShowDetails(false); };
 
   async function submit(e) {
     e.preventDefault();
@@ -263,6 +292,9 @@ export default function StockIps() {
     let newItems = 0;
     try {
       if (!order) {
+        // 0. this vendor's Bill No must not be saved already – checked before anything is added
+        const used = await checkBillNo(head.supplier_id, head.bill_no);
+        if (used) { setBillUsed(used); return toast(t('ips.billNoUsed', { no: head.bill_no.trim().toUpperCase(), si: used }), 'error'); }
         // 1. new items (a row typed without picking is linked first if its item is in the Item List)
         setSaving('ips.stepItems');
         const ids = new Map(lines.filter((r) => r.item_id).map((r) => [r.key, r.item_id]));
@@ -287,7 +319,7 @@ export default function StockIps() {
         order = await api('/pharmacy/purchase-orders', {
           method: 'POST',
           body: {
-            supplier_id: head.supplier_id, po_date: head.date, round_off: roundOn, disc_percent: Number(billDisc) || 0,
+            supplier_id: head.supplier_id, po_date: head.date, round_off: roundOn, disc_percent: 0,
             details: [head.details.trim(), `${t('menu.threeInOne')} · ${t('ips.billNo')}: ${head.bill_no.trim().toUpperCase()}`].filter(Boolean).join('\n'),
             lines: lines.map((r) => ({
               item_id: ids.get(r.key), mrp: r.mrp, p_rate: r.p_rate, disc_percent: r.disc || 0,
@@ -405,8 +437,10 @@ export default function StockIps() {
           </div>
           <div>
             <label className="label">{t('ips.billNo')} *</label>
-            <input className="input uppercase" maxLength={50} value={head.bill_no} placeholder={t('ips.billNoPh')}
+            <input className={`input uppercase ${billUsed ? '!border-red-400 focus:!ring-red-200' : ''}`} maxLength={50} value={head.bill_no} placeholder={t('ips.billNoPh')}
+              aria-invalid={billUsed ? true : undefined}
               onChange={(e) => setHead((h) => ({ ...h, bill_no: e.target.value.toUpperCase() }))} />
+            {billUsed && <p className="mt-1 text-11 font-medium text-red-600">{billUsedText}</p>}
           </div>
           {showDetails ? (
             <div>
@@ -423,6 +457,22 @@ export default function StockIps() {
 
         <NewVendorBox vendor={newVendor} setVendor={setNewVendor} onSaved={(v) => { setAdded((a) => [...a, v]); chooseVendor(v); }} />
         {saving && <Note className="mt-3">{t(saving)}</Note>}
+
+        {/* Disc % on all lines (every size), then the grid's Columns menu (wide screens) */}
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <label className="inline-flex items-center gap-1.5 text-13 text-ink-600" title={t('ips.discAllHint')}>
+            {t('ips.discAll')}
+            <input type="number" min="0" max="100" step="0.01" inputMode="decimal" disabled={locked} value={allDisc} placeholder="0"
+              className={`input no-spin !h-8 !w-16 !py-0 text-right ${allDiscBad ? GRID_BAD : ''}`} aria-label={t('ips.discAll')}
+              onChange={(e) => discAll(e.target.value)} />
+          </label>
+          <div className="hidden items-center gap-3 md:flex">
+            <ColumnsMenu groups={GROUPS.map((g) => ({ id: g.id, label: t(g.label) }))} cols={cols}
+              columns={COLUMNS.map((c) => ({ id: c.id, g: c.g, label: t(c.head) }))}
+              labels={{ button: t('grid.columns'), hidden: t('grid.hiddenN'), hint: t('grid.hint'), showAll: t('grid.showAll'), resetWidths: t('grid.resetWidths') }} />
+            <span className="text-11 text-ink-400">{t('grid.dragHint')}</span>
+          </div>
+        </div>
 
         {/* Phones: one card per line */}
         <div className="mt-3 space-y-2.5 md:hidden">
@@ -473,18 +523,12 @@ export default function StockIps() {
               </ItemCard>
             );
           })}
-          {!locked && <button type="button" className="btn-secondary w-full" onClick={() => setRows((rs) => [...rs, newRow()])}><Plus size={16} /> {t('ips.addRow')}</button>}
+          {!locked && <button type="button" className="btn-secondary w-full" onClick={() => setRows((rs) => [...rs, fresh()])}><Plus size={16} /> {t('ips.addRow')}</button>}
         </div>
 
         {/* Wide screens: the grid, columns grouped as on the Item, Purchase / Order and Stock In screens; each group opens /
             closes with the arrow in its heading (closed: only its main columns). It scrolls in its own box with the
             headings on top and # / Item Name on the left. */}
-        <div className="mt-3 hidden items-center gap-3 md:flex">
-          <ColumnsMenu groups={GROUPS.map((g) => ({ id: g.id, label: t(g.label) }))} cols={cols}
-            columns={COLUMNS.map((c) => ({ id: c.id, g: c.g, label: t(c.head) }))}
-            labels={{ button: t('grid.columns'), hidden: t('grid.hiddenN'), hint: t('grid.hint'), showAll: t('grid.showAll'), resetWidths: t('grid.resetWidths') }} />
-          <span className="text-11 text-ink-400">{t('grid.dragHint')}</span>
-        </div>
         <div className="mt-2 hidden max-h-[65vh] overflow-auto rounded-lg border border-ink-200 md:block">
           <table className="table-fixed border-separate border-spacing-0 text-left text-12" style={{ width: tableWidth, minWidth: '100%' }}>
             {/* each column's width (a fixed table takes them from here, not from the merged group headings) */}
@@ -579,20 +623,12 @@ export default function StockIps() {
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4 text-13 text-ink-600">
             <span>{t('purchase.sumTotal')} <b className="tabular-nums text-ink-800">{money(sum)}</b></span>
-            {/* the whole bill's discount, as on the supplier's bill ("Disc% 2"): off the Sum of Total, before Round Off */}
-            <label className="inline-flex items-center gap-1.5" title={t('ips.billDiscHint')}>
-              {t('ips.billDisc')}
-              <input type="number" min="0" max="100" step="0.01" inputMode="decimal" disabled={locked} value={billDisc} placeholder="0"
-                className={`input no-spin !h-8 !w-16 !py-0 text-right ${billDiscBad ? GRID_BAD : ''}`} aria-label={t('ips.billDisc')}
-                onChange={(e) => setBillDisc(e.target.value)} />
-              <span className="tabular-nums text-red-600">{net.disc_amount ? `− ${money(net.disc_amount)}` : ''}</span>
-            </label>
             <label className="inline-flex items-center gap-1.5">
               <input type="checkbox" checked={roundOn} disabled={locked} onChange={(e) => setRoundOn(e.target.checked)} /> {t('sale.roundOff')}
               <span className={`tabular-nums ${roundOff < 0 ? 'text-red-600' : ''}`}>{roundOff > 0 ? '+' : ''}{money(roundOff)}</span>
             </label>
             <span>{t('ips.netAmount')} <b className="tabular-nums text-brand-800">{money(net.net)}</b></span>
-            {!locked && <button type="button" className="btn-ghost !px-2 !py-1 text-13 max-md:hidden" onClick={() => setRows((rs) => [...rs, newRow()])}><Plus size={15} /> {t('ips.addRow')}</button>}
+            {!locked && <button type="button" className="btn-ghost !px-2 !py-1 text-13 max-md:hidden" onClick={() => setRows((rs) => [...rs, fresh()])}><Plus size={15} /> {t('ips.addRow')}</button>}
           </div>
           <div className="flex gap-2">
             <button type="button" className="btn-secondary px-2 sm:px-4" onClick={reset} disabled={!!saving}><X size={16} /> {locked ? t('ips.startOver') : t('ips.clear')}</button>

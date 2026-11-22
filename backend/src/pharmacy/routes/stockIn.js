@@ -52,6 +52,15 @@ async function orderLines(clinicId, poId, exceptId = 0) {
  * Exp.Date cannot be a past month and Mf.Date cannot be a future month – except a month kept unchanged when
  * editing (`saved`: po_item_id → { mfg_date, exp_date } as 'YYYY-MM', as saved before).
  */
+// A vendor's Bill No (its own invoice number) is entered once: the Stock In No that already has it for this
+// vendor (other than exceptId), or null. Two vendors may use the same number.
+async function billNoUsed(clinicId, supplierId, billNo, exceptId = 0) {
+  if (!billNo) return null;
+  const [row] = await query('SELECT TOP 1 si_no FROM stock_ins WHERE clinic_id = ? AND supplier_id = ? AND bill_no = ? AND id <> ?',
+    [clinicId, supplierId, billNo, exceptId || 0]);
+  return row ? row.si_no : null;
+}
+
 async function clean(body, clinicId, exceptId = 0, saved = new Map()) {
   const supplierId = toId(body?.supplier_id, 'vendor');
   const poId = toId(body?.po_id, 'purchase order');
@@ -66,6 +75,10 @@ async function clean(body, clinicId, exceptId = 0, saved = new Map()) {
   const billNo = String(body?.bill_no ?? '').trim().toUpperCase();
   if (hasBillNo && !billNo) throw badRequest('Bill No is required', 'VALIDATION');
   if (billNo.length > 50) throw badRequest('Bill No must be at most 50 characters', 'VALIDATION');
+  if (hasBillNo) {
+    const used = await billNoUsed(clinicId, supplierId, billNo, exceptId);
+    if (used) throw badRequest(`Bill No ${billNo} is already saved for this vendor (Stock In ${used})`, 'VALIDATION');
+  }
 
   const byLine = new Map((await orderLines(clinicId, poId, exceptId)).map((l) => [l.po_item_id, l]));
   const input = Array.isArray(body?.lines) ? body.lines : [];
@@ -241,6 +254,14 @@ router.get('/order/:poId', async (req, res) => {
   if (!po) throw notFound('Purchase order');
   const except = req.query.except ? toId(req.query.except) : 0;
   res.json({ rows: await orderLines(req.clinicId, poId, except) });
+});
+
+// GET /api/pharmacy/stock-ins/bill-no?supplier_id=&bill_no= – { si_no } of the Stock In that already has this
+// vendor's Bill No, or { si_no: null } (Three in One checks before it saves anything)
+router.get('/bill-no', async (req, res) => {
+  const supplierId = toId(req.query.supplier_id, 'vendor');
+  const billNo = String(req.query.bill_no ?? '').trim().toUpperCase();
+  res.json({ si_no: await billNoUsed(req.clinicId, supplierId, billNo) });
 });
 
 router.get('/:id', async (req, res) => {

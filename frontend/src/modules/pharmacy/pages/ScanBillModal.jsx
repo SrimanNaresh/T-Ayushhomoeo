@@ -6,8 +6,11 @@
 //  2. Drag a box around the item table, header row included (or read the whole page).
 //  3. Match columns: the bill's table as read, with a tile for each Three in One column; tiles that clearly
 //     match are placed already. Drag a tile onto a bill column (or tap the tile, then the column).
-//  4. onLines(lines, { supplier }) fills the Three in One table; nothing is saved here.
-// Prices follow this app's Purchase / Order: P.Rate is the rate before Disc %, Disc % comes off P.Rate.
+//  4. onLines(lines, { supplier }) fills the Three in One table; nothing is saved here. The popup then stays
+//     open so a bill of several pages is done page by page: read the next page of the same file, or add the
+//     next page's photo / PDF (several files can be picked at once). The supplier is sent with the first fill
+//     only, and the next page starts with the column matching used last when it has as many columns.
+// P.Rate and Disc % are taken exactly as read from the bill: nothing is worked out for them.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera, FileUp, ScanLine, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Crop, ArrowLeft, Sparkles,
@@ -31,6 +34,11 @@ export default function ScanBillModal({ open, onClose, onLines }) {
   const [busy, setBusy] = useState(null);     // { stage, percent } while working
   const [error, setError] = useState('');
   const [supplier, setSupplier] = useState(null);   // { vendorName, billDate, … } read from the top of page 1
+  const [done, setDone] = useState([]);       // pages whose lines are already in the table
+  const [added, setAdded] = useState(0);      // lines sent to the table since the popup opened
+  const lastMap = useRef(null);   // { n: column count, map } of the last fill, offered again for the next page
+  const sentSupplier = useRef(false);
+  const appendRef = useRef(false); // the file being picked adds pages instead of starting over
   const photoRef = useRef(null);
   const fileRef = useRef(null);
   const ocrRef = useRef(null);    // the Tesseract reader (a promise), made when the popup opens
@@ -39,7 +47,9 @@ export default function ScanBillModal({ open, onClose, onLines }) {
   const reset = () => {
     setStep('pick'); setPages([]); setPageNo(0); setBox(null); setZoom(1); setMoving(false);
     setError(''); setBusy(null); setSupplier(null); setTable(null); setColMap({});
+    setDone([]); setAdded(0); lastMap.current = null; sentSupplier.current = false;
   };
+  const pick = (ref, append) => { appendRef.current = append; ref.current?.click(); };
 
   // The reader is started when the popup opens (the first time it downloads its language data) and freed
   // when it closes; getOcr waits for it, or starts it again if that failed (e.g. no network then).
@@ -70,29 +80,36 @@ export default function ScanBillModal({ open, onClose, onLines }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // 1. A bill was chosen: show it, turned upright
+  // 1. A bill was chosen (one or more photos / PDFs, in the order picked): show its pages, turned upright.
+  //    When adding pages, they go after the ones already open and the first new one is shown.
   const onFile = async (e) => {
-    const file = e.target.files?.[0];
+    const files = [...(e.target.files || [])];
     e.target.value = '';
-    if (!file) return;
-    reset();
+    if (!files.length) return;
+    const append = appendRef.current && pages.length > 0;
+    appendRef.current = false;
+    if (!append) reset();
+    setError('');
     try {
       setBusy({ stage: t('scan.busyOpen'), percent: null });
       const { loadBillPages, rotateCanvas } = await import('../utils/billOcr.js');
-      const loaded = await loadBillPages(file);
+      const loaded = [];
+      for (const f of files) loaded.push(...await loadBillPages(f));
       const ocr = await getOcr();
       setBusy({ stage: t('scan.busyTurn'), percent: null });
       const upright = [];
-      let deg = null;   // a PDF's pages are usually all turned the same way: page 1's angle is tried first
+      let deg = null;   // a bill's pages are usually all turned the same way: the first page's angle is tried first
       for (const p of loaded) {
         deg = await ocr.uprightAngle(p, deg);
         upright.push(rotateCanvas(p, deg));
       }
-      setPages(upright);
+      setPages((ps) => (append ? [...ps, ...upright] : upright));
+      setPageNo(append ? pages.length : 0);
+      setBox(null); setZoom(1); setMoving(false); setTable(null);
       setStep('select');
     } catch (err) {
       setError(err.message || t('scan.openFailed'));
-      setStep('pick');
+      if (!append) setStep('pick');
     } finally {
       setBusy(null);
     }
@@ -123,7 +140,8 @@ export default function ScanBillModal({ open, onClose, onLines }) {
       const billTable = extractBillTable(layout);
       if (!billTable?.rows.length) { setError(t('scan.noTable')); return; }
       setTable(billTable);
-      setColMap(autoMapTable(billTable));
+      const prev = lastMap.current;
+      setColMap(prev && prev.n === billTable.heads.length ? prev.map : autoMapTable(billTable));
       setStep('map');
     } catch (err) {
       setError(err.message || t('scan.readFailed'));
@@ -133,19 +151,32 @@ export default function ScanBillModal({ open, onClose, onLines }) {
   };
 
   // 3. The columns are matched: every line with an item name goes back to fill the table
-  const apply = () => onLines(linesOf(table, colMap), { supplier });
+  //    The popup stays open for the bill's next page.
+  const apply = async () => {
+    const lines = linesOf(table, colMap);
+    lastMap.current = { n: table.heads.length, map: colMap };
+    const first = !sentSupplier.current;
+    sentSupplier.current = true;
+    await onLines(lines, { supplier: first ? supplier : null });
+    setAdded((n) => n + lines.length);
+    setDone((d) => (d.includes(pageNo) ? d : [...d, pageNo]));
+    setBox(null);
+    setStep('done');
+  };
+  const nextOpen = pages.findIndex((_, i) => i > pageNo && !done.includes(i));
+  const goPage = (n) => { setPageNo(n); setBox(null); setTable(null); setStep('select'); };
 
   const working = Boolean(busy);
   const page = pages[pageNo];
   const steps = [['pick', t('scan.stepUpload')], ['select', t('scan.stepSelect')], ['map', t('scan.stepMatch')]];
-  const at = steps.findIndex(([k]) => k === step);
+  const at = step === 'done' ? steps.length : steps.findIndex(([k]) => k === step);
   const ghost = 'btn-ghost !px-1.5 !py-1';
 
   return (
     <Modal open={open} onClose={working ? () => {} : onClose} size="xl" title={t('scan.title')}>
       <div className="space-y-3">
         <input ref={photoRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onFile} />
-        <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf" className="hidden" onChange={onFile} />
+        <input ref={fileRef} type="file" multiple accept="image/*,application/pdf,.pdf" className="hidden" onChange={onFile} />
 
         <ol className="flex items-center gap-2 text-11 font-semibold">
           {steps.map(([k, label], i) => (
@@ -165,10 +196,10 @@ export default function ScanBillModal({ open, onClose, onLines }) {
               <p className="text-12">{t('scan.uploadHint')}</p>
             </div>
             <div className="flex w-full max-w-sm gap-2">
-              <button type="button" className="btn-secondary min-w-0 flex-1 whitespace-nowrap px-2 sm:hidden" onClick={() => photoRef.current?.click()}>
+              <button type="button" className="btn-secondary min-w-0 flex-1 whitespace-nowrap px-2 sm:hidden" onClick={() => pick(photoRef, false)}>
                 <Camera size={16} /> {t('scan.takePhoto')}
               </button>
-              <button type="button" className="btn-primary min-w-0 flex-1 whitespace-nowrap px-2" onClick={() => fileRef.current?.click()}>
+              <button type="button" className="btn-primary min-w-0 flex-1 whitespace-nowrap px-2" onClick={() => pick(fileRef, false)}>
                 <FileUp size={16} /> {t('scan.upload')}
               </button>
             </div>
@@ -198,6 +229,7 @@ export default function ScanBillModal({ open, onClose, onLines }) {
                   <>
                     <button type="button" className={ghost} disabled={working || pageNo === 0} title={t('scan.prevPage')} onClick={() => { setPageNo((x) => x - 1); setBox(null); }}><ChevronLeft size={16} /></button>
                     <span className="text-12 tabular-nums text-ink-500">{t('scan.page', { n: pageNo + 1, total: pages.length })}</span>
+                    {done.includes(pageNo) && <span className="badge bg-emerald-50 text-emerald-700"><Check size={12} /> {t('scan.pageAdded')}</span>}
                     <button type="button" className={ghost} disabled={working || pageNo === pages.length - 1} title={t('scan.nextPage')} onClick={() => { setPageNo((x) => x + 1); setBox(null); }}><ChevronRight size={16} /></button>
                     <span className="mx-1 h-4 w-px bg-ink-200" />
                   </>
@@ -220,7 +252,12 @@ export default function ScanBillModal({ open, onClose, onLines }) {
             <BoxSelect page={page} box={box} onBox={setBox} disabled={working} zoom={zoom} moving={moving} hint={t('scan.dragHint')} />
 
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-ink-100 pt-3">
-              <button type="button" className="btn-secondary" disabled={working} onClick={() => fileRef.current?.click()}><FileUp size={16} /> {t('scan.anotherBill')}</button>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="btn-secondary" disabled={working} title={t('scan.addPagesHint')} onClick={() => pick(fileRef, true)}><Plus size={16} /> {t('scan.addPages')}</button>
+                {added > 0
+                  ? <button type="button" className="btn-secondary" disabled={working} onClick={onClose}><Check size={16} /> {t('scan.finish')}</button>
+                  : <button type="button" className="btn-secondary" disabled={working} onClick={() => pick(fileRef, false)}><FileUp size={16} /> {t('scan.anotherBill')}</button>}
+              </div>
               <div className="flex flex-wrap gap-2">
                 {box && <button type="button" className="btn-secondary" disabled={working} onClick={() => setBox(null)}><X size={16} /> {t('scan.cancelSelection')}</button>}
                 <button type="button" className="btn-secondary" disabled={working} onClick={() => read(true)}><Sparkles size={16} /> {t('scan.readWhole')}</button>
@@ -243,6 +280,28 @@ export default function ScanBillModal({ open, onClose, onLines }) {
             onRemoveRow={(r) => setTable((tb) => ({ ...tb, rows: tb.rows.filter((_, x) => x !== r) }))}
             onBack={() => setStep('select')} onDone={apply}
           />
+        )}
+
+        {step === 'done' && !busy && (
+          <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/40 px-4 py-8 text-center">
+            <Check size={28} className="text-emerald-600" />
+            <div className="text-13 text-ink-600">
+              <p className="font-semibold text-ink-800">{t('scan.doneTitle', { n: added, pages: done.length })}</p>
+              <p className="text-12">{nextOpen >= 0 ? t('scan.doneNextHint', { n: nextOpen + 1 }) : t('scan.doneMoreHint')}</p>
+            </div>
+            <div className="flex w-full max-w-lg flex-wrap justify-center gap-2">
+              {nextOpen >= 0 && (
+                <button type="button" className="btn-primary" onClick={() => goPage(nextOpen)}>
+                  <ChevronRight size={16} /> {t('scan.readPage', { n: nextOpen + 1 })}
+                </button>
+              )}
+              <button type="button" className="btn-secondary sm:hidden" onClick={() => pick(photoRef, true)}><Camera size={16} /> {t('scan.photoNext')}</button>
+              <button type="button" className={nextOpen >= 0 ? 'btn-secondary' : 'btn-primary'} onClick={() => pick(fileRef, true)}>
+                <FileUp size={16} /> {t('scan.uploadNext')}
+              </button>
+              <button type="button" className="btn-secondary" onClick={onClose}><Check size={16} /> {t('scan.finish')}</button>
+            </div>
+          </div>
         )}
       </div>
     </Modal>

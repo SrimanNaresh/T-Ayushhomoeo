@@ -1,6 +1,6 @@
 // Pharmacy → Three in One → Scan Bill: the bill's columns → a Three in One line. Pure functions (no OCR, no
 // React), so they can be tested in node: backend/test/billIps.test.js. Used by pages/ScanBillModal.jsx.
-import { compact } from './billScan.js';
+import { compact, UNREAD_NAME } from './billScan.js';
 
 // The Three in One columns a bill column can fill, as tiles: [key, i18n key, width px]. Net Rate, Amount,
 // CGST / SGST, GST Amt and Total only help work out P.Rate / GST % when the bill has no such column.
@@ -152,10 +152,9 @@ export function fieldsOf(cells, map) {
     if (k === 'cgst' || map.cgst == null) o.cgst = r2(pair[0]);
     if (k === 'sgst' || map.sgst == null) o.sgst = r2(pair[1]);
   }
-  if (!(n('pRate') > 0)) {
-    const net = n('amount') > 0 && n('qty') > 0 ? n('amount') / n('qty') : n('oldPrice');
-    if (net > 0) o.pRate = r2(net);
-  }
+  // P.Rate is the bill's rate as read – never worked out from other figures. With no Rate column, a
+  // Net Rate column read from the bill is used as it is.
+  if (!(n('pRate') > 0) && n('oldPrice') > 0) o.pRate = r2(n('oldPrice'));
   if (!o.gst) {
     const amt = n('amount') || n('qty') * n('oldPrice');
     if (o.cgst || o.sgst) o.gst = r2(n('cgst') + n('sgst'));
@@ -167,8 +166,11 @@ export function fieldsOf(cells, map) {
   return o;
 }
 
-/** Every bill line with an item name, through the column matches */
+/** Every bill line with an item name (or one whose name couldn't be read), through the column matches */
 export function linesOf(table, map) {
   const blank = Object.fromEntries(TARGETS.map(([k]) => [k, '']));
-  return table.rows.map((cells) => ({ ...blank, ...fieldsOf(cells, map) })).filter((f) => compact(f.name));
+  // (A line whose name couldn't be read comes as UNREAD_NAME: it is kept, with an empty name to fill in.)
+  return table.rows.map((cells) => ({ ...blank, ...fieldsOf(cells, map) }))
+    .filter((f) => compact(f.name) || String(f.name).trim() === UNREAD_NAME)
+    .map((f) => (String(f.name).trim() === UNREAD_NAME ? { ...f, name: '' } : f));
 }

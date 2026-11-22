@@ -490,7 +490,7 @@ export default function Layout({ path, children }) {
 
       <div className="flex min-h-0 flex-1">
         {side && <SideNav path={path} className="hidden animate-slide-in lg:block" />}
-        <main className="no-scrollbar min-w-0 flex-1 overflow-y-auto px-3 pb-6 pt-2 sm:px-4 lg:px-6">
+        <main className="min-w-0 flex-1 overflow-y-auto px-3 pb-6 pt-2 sm:px-4 lg:px-6">
           <div className="mx-auto w-full max-w-[1800px] animate-fade-in">{children}</div>
         </main>
       </div>
